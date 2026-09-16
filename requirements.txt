@@ -1,0 +1,19 @@
+# Seismic Playground — dependencies
+# Core app
+# Tested against 1.63. Uses the modern `width="stretch"` default for
+# charts/tables (no `use_container_width`, which newer Streamlit
+# versions warn is deprecated) — an older 1.3x release would need
+# `use_container_width=True` added back in views/ instead.
+streamlit
+
+# Numerical / scientific
+numpy
+scipy
+pandas
+
+# SEG-Y I/O (read + write)
+segyio
+
+# Visualization
+plotly
+matplotlib   # only used for its Path/polygon-containment test in the F-K filter mask

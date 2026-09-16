@@ -1,6 +1,6 @@
 """
-app.py — Seismic Processing & Interpretation Platform
-=========================================================
+app.py — Seismic Playground
+================================
 Single-file entry point, mirroring the architecture of the reference
 Petrophysics app: page modules are imported and called here, all
 persistent state lives in `st.session_state` (via `utils.session_state`),
@@ -21,7 +21,7 @@ import streamlit as st
 import config as cfg
 from modules.pipeline import PIPELINE_STAGES as _pipeline_stages
 from utils import session_state as ss
-from views import (attributes_view, data_management, export_view, home,
+from views import (attributes_view, cdp_sort_view, data_management, export_view, home,
                     interpretation_view, migration_view, poststack_view,
                     preprocessing_view, stacking_view, velocity_nmo_view)
 
@@ -47,6 +47,7 @@ PAGES = {
     "🏠 Home": home.render,
     "📂 Data Management": data_management.render,
     "⚙️ Pre-Stack Conditioning": preprocessing_view.render,
+    "🔀 CDP Sort & Binning": cdp_sort_view.render,
     "🎯 Velocity, NMO & DMO": velocity_nmo_view.render,
     "📚 Stacking": stacking_view.render,
     "🧹 Post-Stack Processing": poststack_view.render,
@@ -58,7 +59,7 @@ PAGES = {
 
 with st.sidebar:
     st.markdown(f"## {cfg.APP_ICON} {cfg.APP_TITLE}")
-    st.caption(f"v{cfg.APP_VERSION}")
+    st.caption(f"{cfg.APP_TAGLINE} · v{cfg.APP_VERSION}")
     page = st.radio("Navigate", list(PAGES.keys()), key="active_page", label_visibility="collapsed")
     st.divider()
     st.progress(ss.progress_fraction(),

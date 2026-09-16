@@ -1,0 +1,11 @@
+# No [theme] section on purpose: leaving Streamlit's theme unset means it
+# follows the user's system/browser light-dark preference. The app's own
+# CSS (in app.py) and every Plotly figure (visualization/theme.py) are
+# written to stay legible either way rather than assuming a fixed theme.
+
+[server]
+headless = true
+maxUploadSize = 500
+
+[browser]
+gatherUsageStats = false

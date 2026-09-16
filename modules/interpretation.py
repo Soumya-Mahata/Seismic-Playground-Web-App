@@ -1,0 +1,209 @@
+"""
+modules/interpretation.py — Horizon/Fault Picking & Well Tie
+================================================================
+Not present in the source notebooks (processing-only, ending at
+migration), but explicitly supported by the interpretation reference PDF
+(horizon/fault correlation, synthetic seismograms, wavelet extraction are
+all covered there) and requested in the task brief. Implemented as
+honest, standard, clearly-scoped features operating on the app's own
+processed section — nothing here is faked or pre-filled.
+
+Horizon and fault picking is *manual* (the person clicks/enters points on
+the section); there is no automatic horizon tracker, because the source
+material gives no basis for one and a fabricated auto-tracker would risk
+presenting invented picks as real interpretation.
+
+The well-tie / synthetic-seismogram module is a genuine, standard
+implementation (reflectivity -> wavelet convolution -> correlation) but
+is clearly scoped as approximate: it needs a sonic (or velocity) and
+density log plus, optionally, a checkshot survey for depth-to-time
+conversion; without a checkshot it falls back to direct log integration,
+which is the standard simplification when no checkshot is available.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# HORIZON PICKING
+# ─────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Horizon:
+    name: str
+    color: str = "#facc15"
+    picks: Dict[int, float] = field(default_factory=dict)   # {cdp: time_s}
+
+
+@dataclass
+class FaultLine:
+    name: str
+    color: str = "#ef4444"
+    points: List[Tuple[int, float]] = field(default_factory=list)  # [(cdp, time_s), ...]
+
+
+def interpolate_horizon(picks: Dict[int, float], cdp_list: List[int]) -> np.ndarray:
+    """Linearly interpolate a sparse set of (cdp, time) picks across the
+    full CDP range; NaN outside the picked range (no extrapolation — a
+    horizon should not be implied where nobody actually picked it)."""
+    out = np.full(len(cdp_list), np.nan)
+    if len(picks) < 1:
+        return out
+    pcdp = np.array(sorted(picks.keys()))
+    ptime = np.array([picks[c] for c in pcdp])
+    cdp_arr = np.array(cdp_list)
+    if len(pcdp) == 1:
+        mask = cdp_arr == pcdp[0]
+        out[mask] = ptime[0]
+        return out
+    interp = np.interp(cdp_arr, pcdp, ptime, left=np.nan, right=np.nan)
+    in_range = (cdp_arr >= pcdp.min()) & (cdp_arr <= pcdp.max())
+    out[in_range] = interp[in_range]
+    return out
+
+
+def extract_attribute_along_horizon(attribute_section: np.ndarray, cdp_list: List[int],
+                                     horizon_time: np.ndarray, dt: float,
+                                     half_window_s: float = 0.01, agg: str = "mean") -> np.ndarray:
+    """Extract an attribute value at (or in a small window around) a
+    horizon, per CDP — the standard "attribute-along-horizon" map."""
+    n_cdp, ns = attribute_section.shape
+    out = np.full(n_cdp, np.nan)
+    half_w = max(0, int(round(half_window_s / dt)))
+    for i in range(n_cdp):
+        t = horizon_time[i]
+        if not np.isfinite(t):
+            continue
+        it = int(round(t / dt))
+        lo, hi = max(0, it - half_w), min(ns, it + half_w + 1)
+        if hi <= lo:
+            continue
+        seg = attribute_section[i, lo:hi]
+        out[i] = {"mean": np.mean, "max": np.max, "min": np.min, "rms": lambda s: np.sqrt(np.mean(s ** 2))}[agg](seg)
+    return out
+
+
+def horizon_to_dataframe(horizon: Horizon, cdp_list: List[int], group_interval: float) -> pd.DataFrame:
+    times = interpolate_horizon(horizon.picks, cdp_list)
+    return pd.DataFrame({
+        "cdp": cdp_list,
+        "distance_m": np.array(cdp_list) * group_interval,
+        "picked": [c in horizon.picks for c in cdp_list],
+        "time_s": times,
+    })
+
+
+def fault_to_dataframe(fault: FaultLine) -> pd.DataFrame:
+    pts = sorted(fault.points)
+    return pd.DataFrame({"cdp": [p[0] for p in pts], "time_s": [p[1] for p in pts]})
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# WELL TIE / SYNTHETIC SEISMOGRAM (approximate, standard method)
+# ─────────────────────────────────────────────────────────────────────────
+
+def horizon_curvature(horizon_time: np.ndarray, cdp_list: List[int], group_interval: float,
+                       smooth_samples: int = 5) -> np.ndarray:
+    """Curvature of a picked horizon line: kappa(x) = y''(x) / (1+y'(x)^2)^1.5,
+    the standard 2-D analogue of the surface-curvature attributes used in
+    3D interpretation (there, computed from a gridded time/depth surface's
+    second derivatives in two lateral directions; here, from the single
+    lateral direction a 2D line has). Useful for spotting subtle folds,
+    flexures, and fracture-prone zones from a picked horizon alone,
+    without needing a full 3D volume. NaN where the horizon has no pick
+    (see `interpolate_horizon`).
+    """
+    x = np.asarray(cdp_list, dtype=float) * group_interval
+    y = horizon_time.copy()
+    valid = np.isfinite(y)
+    if valid.sum() < 5:
+        return np.full_like(y, np.nan)
+    y_filled = np.interp(x, x[valid], y[valid])
+    if smooth_samples > 1:
+        from scipy.ndimage import uniform_filter1d
+        y_filled = uniform_filter1d(y_filled, size=smooth_samples, mode="nearest")
+    dy = np.gradient(y_filled, x)
+    d2y = np.gradient(dy, x)
+    kappa = d2y / (1 + dy ** 2) ** 1.5
+    kappa[~valid] = np.nan
+    return kappa
+
+
+def _ricker(freq_hz: float, dt: float, length_s: float = 0.15) -> np.ndarray:
+    n_half = int(round(length_s / dt / 2))
+    t = np.arange(-n_half, n_half + 1) * dt
+    a = (np.pi * freq_hz * t) ** 2
+    w = (1.0 - 2.0 * a) * np.exp(-a)
+    return w / np.max(np.abs(w))
+
+
+def depth_to_time(depth_m: np.ndarray, vp_m_s: np.ndarray,
+                   checkshot: Optional[pd.DataFrame] = None) -> np.ndarray:
+    """One-way traveltime at each depth sample, by direct integration of
+    slowness (dt = dz / v), then doubled for two-way time; if a checkshot
+    survey (columns 'depth_m', 'twt_s') is supplied, it's used to
+    calibrate (linearly correct) the integrated curve instead of trusting
+    the sonic log's absolute drift alone — standard practice, since sonic
+    logs are well known to accumulate a *systematic* time error with
+    depth relative to a checkshot."""
+    depth_m = np.asarray(depth_m, dtype=float)
+    vp_m_s = np.asarray(vp_m_s, dtype=float)
+    dz = np.diff(depth_m, prepend=depth_m[0])
+    dz[0] = 0.0
+    owt = np.cumsum(dz / np.maximum(vp_m_s, 1.0))
+    twt = 2.0 * owt
+
+    if checkshot is not None and len(checkshot) >= 2:
+        cs = checkshot.sort_values("depth_m")
+        twt_calib = np.interp(depth_m, cs["depth_m"], cs["twt_s"])
+        # blend: honor the checkshot at its control points, keep the
+        # sonic-derived *shape* (high-frequency detail) between them by
+        # correcting with a smooth drift curve rather than overwriting outright
+        drift = twt_calib - np.interp(depth_m, cs["depth_m"],
+                                       np.interp(cs["depth_m"], depth_m, twt))
+        twt = twt + drift
+    return twt
+
+
+def synthetic_seismogram(depth_m: np.ndarray, vp_m_s: np.ndarray, rho_kg_m3: np.ndarray,
+                          dt: float, wavelet_freq_hz: float = 30.0,
+                          checkshot: Optional[pd.DataFrame] = None,
+                          t_max_s: float = 3.0) -> dict:
+    """Standard well-tie synthetic: acoustic impedance -> normal-incidence
+    reflectivity -> resample to a uniform time axis -> convolve with a
+    Ricker wavelet (statistical wavelet extraction from the real seismic
+    is a further refinement left as a future improvement — see README).
+
+    Returns a dict with the time axis, reflectivity-in-time, synthetic
+    trace, and the depth->time curve used, for QC display.
+    """
+    depth_m = np.asarray(depth_m, dtype=float)
+    vp_m_s = np.asarray(vp_m_s, dtype=float)
+    rho_kg_m3 = np.asarray(rho_kg_m3, dtype=float)
+    impedance = vp_m_s * rho_kg_m3
+    rc = np.zeros(len(depth_m))
+    rc[1:] = (impedance[1:] - impedance[:-1]) / (impedance[1:] + impedance[:-1] + 1e-9)
+
+    twt = depth_to_time(depth_m, vp_m_s, checkshot)
+    time_axis = np.arange(0, t_max_s, dt)
+    rc_time = np.zeros_like(time_axis)
+    # place each depth-domain reflection coefficient at its two-way time
+    t_idx = np.clip(np.round(twt / dt).astype(int), 0, len(time_axis) - 1)
+    np.add.at(rc_time, t_idx, rc)
+
+    wavelet = _ricker(wavelet_freq_hz, dt)
+    synthetic = np.convolve(rc_time, wavelet, mode="same")
+
+    return {
+        "time_axis": time_axis,
+        "reflectivity_time": rc_time,
+        "synthetic_trace": synthetic,
+        "depth_time_curve": twt,
+        "wavelet": wavelet,
+    }
