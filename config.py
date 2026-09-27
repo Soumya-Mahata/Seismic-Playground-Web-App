@@ -11,7 +11,7 @@ pipeline) unless noted otherwise.
 """
 
 APP_TITLE = "Seismic Playground"
-APP_TAGLINE = "Seismic Processing & Interpretation Platform"
+APP_TAGLINE = "An Interactive Seismic Data Processing & Interpretation Platform"
 APP_ICON = "🌊"
 APP_VERSION = "1.0.0"
 
@@ -93,7 +93,7 @@ APERTURE_M_DEFAULT = 900.0         # m, half-aperture
 FINAL_AGC_WINDOW_DEFAULT = 300     # samples
 
 # ── Display ────────────────────────────────────────────────────────────
-SEISMIC_CMAP = "RdBu"              # perceptually diverging, colorblind-friendlier than seismic
+SEISMIC_CMAP = "Seismic"           # high-contrast navy/white/maroon diverging scale (see visualization/theme.py)
 PCLIP_DEFAULT = 98.0               # percentile amplitude clip for display
 
 # ── Performance guardrails ───────────────────────────────────────────────

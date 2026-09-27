@@ -16,15 +16,17 @@ import streamlit as st
 
 import config as cfg
 from modules import nmo as nmo_mod
+from modules import regularization as reg_mod
 from modules import statics as statics_mod
 from modules import velocity as vel_mod
 from utils import session_state as ss
-from utils.click_picking import click_help_caption, consume_new_click
+from utils.click_picking import numeric_point_form
 from visualization import seismic_plots, velocity_plots
 
 
 def _velocity_pass_ui(*, pass_label: str, stage_id: str, input_key: str, field_key: str,
-                       analysis_key: str, results_key: str, overrides_key: str, excluded_key: str):
+                       analysis_key: str, results_key: str, overrides_key: str, excluded_key: str,
+                       offsets_key: str = "offsets"):
     survey = st.session_state["survey"]
     gathers = st.session_state["gathers"]
     cdp_list = st.session_state["cdp_list"]
@@ -63,7 +65,7 @@ def _velocity_pass_ui(*, pass_label: str, stage_id: str, input_key: str, field_k
             autopick_kwargs=dict(min_time=min_time, search_half_width_ms=search_w,
                                   min_confidence=min_conf, smooth_sigma=int(smooth)),
             manual_overrides=st.session_state[overrides_key], excluded_cdps=st.session_state[excluded_key],
-            progress_cb=lambda f: prog.progress(f, text="Picking velocities..."))
+            progress_cb=lambda f: prog.progress(f, text="Picking velocities..."), offsets_key=offsets_key)
         prog.progress(1.0)
         st.session_state["velocities"] = velocities
         st.session_state[field_key] = Vfield
@@ -97,20 +99,25 @@ def _velocity_pass_ui(*, pass_label: str, stage_id: str, input_key: str, field_k
     semblance = g[f"semblance_{stage_id}"]
 
     manual_pts = st.session_state.get(f"{stage_id}_manual_pts_{cdp_pick}", [])
-    st.caption(click_help_caption() + " (click on the semblance panel to add a velocity pick)")
     fig = velocity_plots.plot_semblance_panel(
         semblance, velocities, twt, picked_velocity=r.velocity, manual_points=manual_pts,
         title=f"Semblance — CDP {cdp_pick} (reliability {r.reliability:.2f})")
-    event = st.plotly_chart(fig, on_select="rerun", selection_mode="points",
-                             key=f"{stage_id}_semblance_click_{cdp_pick}", theme=None)
-    new_pt = consume_new_click(event, f"{stage_id}_semblance_dedup_{cdp_pick}")
+    st.plotly_chart(fig, theme=None, key=f"{stage_id}_semblance_click_{cdp_pick}")
+    st.caption("🔍 Zoom into the panel above to read off a (velocity, time) coordinate on a coherent "
+                "trend, then add it below. (A heatmap-backed plot like this can't deliver reliable "
+                "click events in Streamlit, so points are entered here instead of by clicking on it.)")
+    new_pt = numeric_point_form(
+        f"{stage_id}_vpt_{cdp_pick}", "Velocity (m/s)", "Time (s)",
+        x_value=float(np.median(velocities)), y_value=float(twt[len(twt) // 2]),
+        x_min=float(velocities.min()), x_max=float(velocities.max()),
+        y_min=0.0, y_max=float(twt[-1]), x_step=10.0, y_step=0.01)
     if new_pt is not None:
-        # click gives (velocity, time) since velocity is the x-axis and time the y-axis
         v_click, t_click = new_pt
         manual_pts = manual_pts + [(round(t_click, 4), round(v_click, 1))]
         st.session_state[f"{stage_id}_manual_pts_{cdp_pick}"] = manual_pts
         rev_key = f"{stage_id}_manual_rev_{cdp_pick}"
         st.session_state[rev_key] = st.session_state.get(rev_key, 0) + 1
+        st.rerun()
 
     with st.expander("Constant Velocity Stack (CVS) — a complementary, amplitude-domain check"):
         st.markdown(
@@ -122,7 +129,8 @@ def _velocity_pass_ui(*, pass_label: str, stage_id: str, input_key: str, field_k
         if st.button("Compute CVS panel", key=f"{stage_id}_cvs_btn_{cdp_pick}"):
             with st.spinner("Stacking at each trial velocity..."):
                 panel, power = vel_mod.constant_velocity_stack_panel(
-                    gathers, cdp_list, input_key, cdp_pick, half_win, velocities, dt, ns)
+                    gathers, cdp_list, input_key, cdp_pick, half_win, velocities, dt, ns,
+                    offsets_key=offsets_key)
             st.session_state[f"{stage_id}_cvs_{cdp_pick}"] = (panel, power)
         cvs_result = st.session_state.get(f"{stage_id}_cvs_{cdp_pick}")
         if cvs_result is not None:
@@ -183,7 +191,8 @@ def render():
     dt, twt = survey.sample_interval, survey.twt
 
     tabs = st.tabs(["Velocity Pass 1", "NMO Pass 1", "Residual Statics",
-                    "DMO Correction", "Inverse NMO", "Velocity Pass 2", "Final NMO"])
+                    "DMO Correction", "Inverse NMO", "Data Regularisation",
+                    "RMS Velocity Analysis (Pass 2)", "Final NMO"])
 
     with tabs[0]:
         _velocity_pass_ui(pass_label="Velocity Analysis — Pass 1 (approximate)", stage_id="vel1",
@@ -292,21 +301,63 @@ def render():
         if not ss.require_stage("inv_nmo"):
             pass
         else:
-            _velocity_pass_ui(pass_label="Velocity Analysis — Pass 2 (refined)", stage_id="vel2",
-                               input_key="traces_inv_nmo", field_key="Vfield_2", analysis_key="analysis_2",
-                               results_key="vel_results_2", overrides_key="manual_overrides_2", excluded_key="excluded_cdps_2")
+            st.markdown(
+                "**Data Regularisation** (report Sec 6.11): interpolates every CDP gather's "
+                "irregularly sampled offsets onto one shared, regularly spaced offset grid for the "
+                "whole survey. This is a prerequisite for reliable subsequent velocity analysis, "
+                "stacking, and migration — real fold is rarely evenly spaced across offset (gaps, "
+                "dropped channels, split-spread irregularities), which biases a semblance velocity "
+                "scan and any migration operator that sums over offset."
+            )
+            n_offsets = st.slider("Regularized offsets per CDP", 11, 61, 31, step=2, key="reg_noffsets")
+            if st.button("Run data regularisation", type="primary", key="run_datareg"):
+                with st.spinner("Interpolating gathers onto a regular offset grid..."):
+                    target_offsets = reg_mod.regularize_all_gathers(
+                        gathers, input_key="traces_inv_nmo", offsets_key="offsets",
+                        n_offsets=int(n_offsets))
+                st.session_state["regular_offsets"] = target_offsets
+                ss.mark_stage_done("data_reg", {"n_offsets": int(n_offsets)})
+                st.rerun()
+            if ss.is_stage_done("data_reg"):
+                before_fold, after_fold = reg_mod.fold_before_after(gathers)
+                st.success(f"✅ Data regularised — fold before: {before_fold.min()}-{before_fold.max()} "
+                            f"(irregular offsets) → after: {after_fold.min()}-{after_fold.max()} live "
+                            f"traces on a common {len(st.session_state['regular_offsets'])}-offset grid.")
+                cdp = st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key="datareg_cdp")
+                g = gathers[cdp]
+                order = np.argsort(g["offsets"])
+                st.plotly_chart(seismic_plots.plot_before_after(
+                    g["traces_inv_nmo"][order], g["traces_regularized"],
+                    np.sort(g["offsets"]), twt, x_values_after=g["offsets_regularized"],
+                    title_before="Before (irregular offsets)", title_after="After (regularized offsets)",
+                    x_title="Offset (m)"), theme=None, key="datareg_before_after")
 
     with tabs[6]:
+        if not ss.require_stage("data_reg"):
+            pass
+        else:
+            st.markdown("Refined semblance velocity analysis on the regularized gathers — the "
+                         "report's Sec 6.12 \"RMS Velocity Analysis\", run after data regularisation "
+                         "so the semblance scan sees a consistent offset sampling across every CDP.")
+            _velocity_pass_ui(pass_label="RMS Velocity Analysis (Pass 2, on regularized data)", stage_id="vel2",
+                               input_key="traces_regularized", field_key="Vfield_2", analysis_key="analysis_2",
+                               results_key="vel_results_2", overrides_key="manual_overrides_2",
+                               excluded_key="excluded_cdps_2", offsets_key="offsets_regularized")
+
+    with tabs[7]:
         if not ss.require_stage("vel2"):
             pass
         else:
-            st.markdown("Applies the refined pass-2 stacking-velocity field — this is the gather "
-                         "that will be stacked next.")
+            st.markdown("Applies the refined pass-2 stacking-velocity field to the regularized "
+                         "gathers — this is the gather that will be stacked next.")
             stretch2 = st.slider("Stretch mute (fractional)", 0.05, 1.0, cfg.NMO_STRETCH_MUTE_DEFAULT, key="nmofinal_stretch")
             if st.button("Run final NMO", type="primary", key="run_nmofinal"):
                 for cdp, g in gathers.items():
-                    out, live = nmo_mod.nmo_correction(g["traces_inv_nmo"], g["offsets"], g["vrms_field_vel2"],
-                                                        dt, stretch_mute=stretch2)
+                    out, live = nmo_mod.nmo_correction(g["traces_regularized"], g["offsets_regularized"],
+                                                        g["vrms_field_vel2"], dt, stretch_mute=stretch2)
+                    # AND with the regularization live-mask so offsets outside a gather's real fold
+                    # (zero-filled by interpolation, not real data) don't inflate the stack's fold count.
+                    live = live & g["live_regularized"][:, None]
                     g["traces_nmo_final"], g["nmo_final_live_mask"] = out, live
                 ss.mark_stage_done("nmo_final", {"stretch_mute": stretch2})
                 st.rerun()
@@ -315,5 +366,5 @@ def render():
                 cdp = st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key="nmofinal_cdp")
                 g = gathers[cdp]
                 st.plotly_chart(seismic_plots.plot_before_after(
-                    g["traces_inv_nmo"], g["traces_nmo_final"], np.sort(g["offsets"]), twt,
+                    g["traces_regularized"], g["traces_nmo_final"], g["offsets_regularized"], twt,
                     title_before="Before final NMO", title_after="After final NMO", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_5")

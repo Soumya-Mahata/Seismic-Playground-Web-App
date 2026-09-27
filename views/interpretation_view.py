@@ -1,27 +1,37 @@
 """
-views/interpretation_view.py — Horizon/Fault Picking & Well Tie
+views/interpretation_view.py — Well Tie, Horizon/Fault Picking, Surface Map
 ====================================================================
-Not present in the source processing notebooks (which end at
-migration), but supported by the interpretation reference PDF. Picking
-is primarily **click-on-the-section** (via
-`st.plotly_chart(..., on_select="rerun")`), backed by an editable table
-for precise review/correction — click for speed, table for precision.
-Every pick is exactly what the person clicked or typed, never inferred
-or auto-generated.
+Implements the interpretation workflow in the order the summer report
+lays it out (Ch.8): (1) Well-to-Seismic Tie -> (2) Seismic Horizon
+Picking -> (3) Fault Interpretation -> (4) Surface (Time/Depth) Map
+Generation. Step (5), Seismic Attribute Analysis, is its own page
+(Attributes) since it operates on the finished interpretation.
+
+Horizon/fault picking is click-*entered* rather than click-*on-the-
+plot*: Streamlit cannot deliver reliable point-selection events for a
+Heatmap-backed figure (see `utils/click_picking` module docstring), so
+each pick is typed in via a small numeric form under a fully zoomable/
+pannable reference plot, backed by an editable table for precise
+review/correction. Every pick is exactly what the person entered or
+edited, never inferred or auto-generated.
 """
 
 from __future__ import annotations
 
+import io
+
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
-from modules.interpretation import (FaultLine, Horizon, fault_to_dataframe,
-                                     horizon_curvature, horizon_to_dataframe,
-                                     interpolate_horizon, synthetic_seismogram)
+from modules.interpretation import (FaultLine, Horizon, extract_statistical_wavelet,
+                                     fault_to_dataframe, horizon_curvature, horizon_to_dataframe,
+                                     interpolate_horizon, read_las_curves, sonic_to_velocity,
+                                     synthetic_seismogram, well_tie_correlation)
 from utils import session_state as ss
-from utils.click_picking import click_help_caption, consume_new_click
-from visualization import interpretation_plots, seismic_plots
+from utils.click_picking import numeric_point_form
+from visualization import controls, interpretation_plots, seismic_plots, theme
 
 _HORIZON_COLORS = ["#facc15", "#22d3ee", "#a78bfa", "#f472b6", "#34d399"]
 _FAULT_COLORS = ["#ef4444", "#f97316", "#dc2626"]
@@ -40,10 +50,17 @@ def _nearest_cdp(cdp_list, x_clicked: float) -> int:
     return int(arr[np.argmin(np.abs(arr - x_clicked))])
 
 
+def _step_caption(current: int):
+    steps = ["1. Well-to-Seismic Tie", "2. Seismic Horizon Picking", "3. Fault Interpretation",
+              "4. Surface (Time/Depth) Map Generation"]
+    parts = [f"**{s}**" if i == current else s for i, s in enumerate(steps)]
+    st.caption(" → ".join(parts) + "  → 5. Seismic Attribute Analysis (see the **Attributes** page)")
+
+
 def render():
     st.header("🧭 Interpretation")
-    st.caption("Horizon and fault picking (click on the section to pick), and an approximate "
-                "well-to-seismic tie.")
+    st.caption("Well-to-seismic tie, horizon and fault picking, and surface map generation — "
+                "in the order the report lays them out (Ch.8).")
 
     if not ss.require_stage("cdp_sort"):
         return
@@ -58,9 +75,171 @@ def render():
     horizons: dict = st.session_state["horizons"]
     faults: dict = st.session_state["faults"]
 
-    tab_horizon, tab_fault, tab_tie = st.tabs(["Horizons", "Faults", "Well Tie (approximate)"])
+    tab_tie, tab_horizon, tab_fault, tab_map = st.tabs(
+        ["① Well Tie", "② Horizon Picking", "③ Fault Interpretation", "④ Surface Map"])
 
+    # =====================================================================
+    # 1) WELL-TO-SEISMIC TIE
+    # =====================================================================
+    with tab_tie:
+        _step_caption(0)
+        st.markdown(
+            "Upload a well log as **CSV** (columns `depth_m`, `vp_m_s`, `rho_kg_m3`) or a **LAS** "
+            "file (curve names vary between wells/vendors, so LAS curves are mapped explicitly "
+            "below rather than assumed). A checkshot CSV (`depth_m`, `twt_s`) is optional — without "
+            "one, depth-to-time comes from integrating the sonic/velocity log directly, the standard "
+            "fallback (report Sec 8.2.1.1, Step 2)."
+        )
+        log_file = st.file_uploader("Well log", type=["csv", "las"], key="welllog_file")
+        checkshot_file = st.file_uploader("Checkshot CSV (optional)", type=["csv"], key="checkshot_csv")
+
+        depth_m = vp_m_s = rho_kg_m3 = None
+        if log_file is not None:
+            if log_file.name.lower().endswith(".las"):
+                try:
+                    raw_bytes = log_file.getvalue()
+                    curves = read_las_curves(io.StringIO(raw_bytes.decode("utf-8", errors="replace")))
+                except ImportError as e:
+                    st.error(str(e))
+                    curves = None
+                except Exception as e:
+                    st.error(f"Couldn't parse this LAS file: {e}")
+                    curves = None
+                if curves:
+                    mnemonics = [k for k in curves if k != "__DEPTH__"]
+                    st.markdown("**Map LAS curves** (this file's mnemonics, not assumed fixed names):")
+                    c1, c2, c3 = st.columns(3)
+                    depth_choice = c1.selectbox("Depth", ["(LAS index)"] + mnemonics, key="las_depth")
+                    vel_curve = c2.selectbox("Velocity or sonic curve", mnemonics, key="las_vel")
+                    rho_curve = c3.selectbox("Density curve", mnemonics, key="las_rho")
+                    c1, c2, c3 = st.columns(3)
+                    depth_unit = c1.selectbox("Depth unit", ["m", "ft"], key="las_depth_unit")
+                    vel_kind = c2.selectbox("Velocity curve is...",
+                                             ["Direct velocity (m/s)", "Direct velocity (ft/s)",
+                                              "Sonic slowness (µs/ft)", "Sonic slowness (µs/m)"],
+                                             key="las_vel_kind")
+                    rho_unit = c3.selectbox("Density unit", ["kg/m3", "g/cc"], key="las_rho_unit")
+
+                    depth_raw = curves["__DEPTH__"] if depth_choice == "(LAS index)" else curves[depth_choice]
+                    depth_m = depth_raw * 0.3048 if depth_unit == "ft" else depth_raw
+                    vel_raw = curves[vel_curve]
+                    if vel_kind == "Direct velocity (m/s)":
+                        vp_m_s = vel_raw
+                    elif vel_kind == "Direct velocity (ft/s)":
+                        vp_m_s = vel_raw * 0.3048
+                    elif vel_kind == "Sonic slowness (µs/ft)":
+                        vp_m_s = sonic_to_velocity(vel_raw, "us_per_ft")
+                    else:
+                        vp_m_s = sonic_to_velocity(vel_raw, "us_per_m")
+                    rho_raw = curves[rho_curve]
+                    rho_kg_m3 = rho_raw * 1000.0 if rho_unit == "g/cc" else rho_raw
+                    valid = np.isfinite(depth_m) & np.isfinite(vp_m_s) & np.isfinite(rho_kg_m3)
+                    depth_m, vp_m_s, rho_kg_m3 = depth_m[valid], vp_m_s[valid], rho_kg_m3[valid]
+                    order = np.argsort(depth_m)
+                    depth_m, vp_m_s, rho_kg_m3 = depth_m[order], vp_m_s[order], rho_kg_m3[order]
+                    st.caption(f"{len(depth_m)} valid depth samples after unit conversion and cleaning.")
+            else:
+                try:
+                    log_df = pd.read_csv(log_file)
+                    required = {"depth_m", "vp_m_s", "rho_kg_m3"}
+                    if not required.issubset(log_df.columns):
+                        st.error(f"Well log CSV must have columns {sorted(required)}.")
+                    else:
+                        depth_m = log_df["depth_m"].values
+                        vp_m_s = log_df["vp_m_s"].values
+                        rho_kg_m3 = log_df["rho_kg_m3"].values
+                except Exception as e:
+                    st.error(f"Couldn't read this CSV: {e}")
+
+        st.divider()
+        st.markdown("**Wavelet** — used to convolve the depth-domain reflectivity into a synthetic trace.")
+        wavelet_source = st.radio("Wavelet source", ["Ricker (choose frequency)",
+                                                        "Statistical (extracted from the seismic data)"],
+                                    key="tie_wavelet_source", horizontal=True)
+        tie_cdp = st.selectbox("Seismic trace to compare (nearest CDP)", cdp_list,
+                                index=len(cdp_list) // 2, key="tie_cdp")
+
+        wavelet_freq = None
+        extracted_wavelet = None
+        if wavelet_source.startswith("Ricker"):
+            wavelet_freq = st.slider("Wavelet peak frequency (Hz)", 10.0, 80.0, 30.0, key="tie_freq")
+        else:
+            st.markdown(
+                "Extracts a zero-phase wavelet directly from a window of the seismic section around "
+                "the tie CDP, using the same white-reflectivity assumption that underlies statistical "
+                "deconvolution (report Sec 6.8.2/8.2.1.1): the ensemble-averaged power spectrum of "
+                "nearby traces approximates the wavelet's own power spectrum."
+            )
+            c1, c2, c3 = st.columns(3)
+            n_cdps = c1.slider("CDPs to average around tie CDP", 1, 41, 15, step=2, key="tie_wav_ncdp")
+            t_win = c2.slider("Extraction time window (s)", 0.0, float(twt[-1]),
+                               (0.0, float(twt[-1])), key="tie_wav_twin")
+            wav_len = c3.slider("Wavelet length (ms)", 40, 400, 150, step=10, key="tie_wav_len")
+            idx = cdp_list.index(tie_cdp)
+            lo, hi = max(0, idx - n_cdps // 2), min(len(cdp_list), idx + n_cdps // 2 + 1)
+            trace_block = np.atleast_2d(section[lo:hi, :])
+            extracted_wavelet = extract_statistical_wavelet(
+                trace_block, survey.sample_interval, length_s=wav_len / 1000.0, t_window=t_win)
+            wav_t = (np.arange(len(extracted_wavelet)) - len(extracted_wavelet) // 2) * survey.sample_interval
+            spec = np.abs(np.fft.rfft(extracted_wavelet))
+            freqs = np.fft.rfftfreq(len(extracted_wavelet), survey.sample_interval)
+            c1, c2 = st.columns(2)
+            with c1:
+                figw = go.Figure(go.Scatter(x=wav_t, y=extracted_wavelet, mode="lines",
+                                              line=dict(color="#0D2B5E", width=2)))
+                figw.update_layout(**theme.base_layout("Extracted wavelet (time domain)", 300))
+                figw.update_xaxes(**theme.x_axis("Time (s)"))
+                figw.update_yaxes(**theme.x_axis("Amplitude"))
+                st.plotly_chart(figw, theme=None, key="tie_wavelet_time")
+            with c2:
+                figs = go.Figure(go.Scatter(x=freqs, y=spec, mode="lines", line=dict(color="#c62828", width=2)))
+                figs.update_layout(**theme.base_layout("Amplitude spectrum", 300))
+                figs.update_xaxes(**theme.x_axis("Frequency (Hz)"))
+                figs.update_yaxes(**theme.x_axis("Amplitude"))
+                st.plotly_chart(figs, theme=None, key="tie_wavelet_spectrum")
+
+        shift_ms = st.slider("Manual bulk shift (ms)", -200, 200, 0, key="tie_shift")
+
+        if depth_m is not None and st.button("Compute synthetic & tie", type="primary"):
+            try:
+                checkshot_df = pd.read_csv(checkshot_file) if checkshot_file is not None else None
+                result = synthetic_seismogram(
+                    depth_m, vp_m_s, rho_kg_m3, survey.sample_interval,
+                    wavelet_freq_hz=wavelet_freq or 30.0, checkshot=checkshot_df,
+                    t_max_s=survey.record_length, wavelet=extracted_wavelet)
+                st.session_state["synthetic_tie"] = result
+                st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't build the synthetic: {e}")
+
+        result = st.session_state.get("synthetic_tie")
+        if result is not None:
+            seismic_trace = section[cdp_list.index(tie_cdp), :]
+            shift_s = shift_ms / 1000.0
+            synth_shifted = np.interp(result["time_axis"] - shift_s, result["time_axis"],
+                                       result["synthetic_trace"], left=0, right=0)
+            syn_n = synth_shifted / (np.max(np.abs(synth_shifted)) + 1e-9)
+            sei_n = seismic_trace / (np.max(np.abs(seismic_trace)) + 1e-9)
+            corr = well_tie_correlation(syn_n, sei_n)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=syn_n, y=result["time_axis"], name="Synthetic", line=dict(color="#c62828")))
+            fig.add_trace(go.Scatter(x=sei_n, y=twt[:len(sei_n)], name=f"Seismic (CDP {tie_cdp})",
+                                      line=dict(color="#0D2B5E")))
+            fig.update_layout(**theme.base_layout("Synthetic-to-Seismic Tie", 600))
+            fig.update_xaxes(**theme.x_axis("Normalized amplitude"))
+            fig.update_yaxes(**theme.time_axis())
+            st.plotly_chart(fig, theme=None, key="tie_chart")
+            badge = "✅ good tie" if corr >= 0.7 else ("⚠️ marginal" if corr >= 0.4 else "❌ poor tie")
+            st.metric("Correlation coefficient (report Sec 8.2.1.1, Step 4)", f"{corr:.2f}", badge)
+            st.caption("Adjust the manual bulk shift above until the strongest synthetic events line "
+                        "up with the strongest seismic events and the correlation coefficient is "
+                        "maximized (≳0.7-0.8 is generally considered a good tie).")
+
+    # =====================================================================
+    # 2) SEISMIC HORIZON PICKING
+    # =====================================================================
     with tab_horizon:
+        _step_caption(1)
         st.caption(f"Interpreting on: **{section_label}**")
         c1, c2 = st.columns([3, 1])
         new_name = c1.text_input("New horizon name", placeholder="e.g. Top Reservoir", key="new_horizon_name")
@@ -73,13 +252,19 @@ def render():
         else:
             name = st.selectbox("Editing horizon", list(horizons.keys()))
             h = horizons[name]
-            st.caption(click_help_caption())
+            disp = controls.section_display_controls("horizon_display", default_colorscale="Seismic")
 
             fig = interpretation_plots.plot_section_with_picks(
-                section, cdp_list, twt, horizons=horizons, faults={}, title=section_label)
-            event = st.plotly_chart(fig, on_select="rerun", selection_mode="points",
-                                     key=f"h_click_{name}", theme=None)
-            new_pt = consume_new_click(event, f"h_dedup_{name}")
+                section, cdp_list, twt, horizons=horizons, faults={}, title=section_label,
+                colorscale=disp.colorscale, equalize=disp.equalize)
+            st.plotly_chart(fig, theme=None, key=f"h_click_{name}")
+            st.caption("🔍 Zoom in on a reflector above to read off its (CDP, time) position, then add "
+                        "the pick below.")
+            new_pt = numeric_point_form(
+                f"h_pt_{name}", "CDP", "Time (s)",
+                x_value=float(np.median(cdp_list)), y_value=float(twt[len(twt) // 3]),
+                x_min=float(min(cdp_list)), x_max=float(max(cdp_list)),
+                y_min=0.0, y_max=float(twt[-1]), x_step=1.0, y_step=0.005)
             if new_pt is not None:
                 cdp_clicked, t_clicked = new_pt
                 h.picks[_nearest_cdp(cdp_list, cdp_clicked)] = round(float(t_clicked), 4)
@@ -107,10 +292,9 @@ def render():
                 with st.expander("Horizon curvature"):
                     st.markdown(
                         "Curvature of the picked horizon line — the 2-D analogue of the "
-                        "surface-curvature attribute used in 3D interpretation (there, computed "
-                        "from a gridded surface's second derivatives in two lateral directions; "
-                        "here, from the single lateral direction a 2D line has). Useful for "
-                        "spotting subtle folds and flexures directly from the pick."
+                        "surface-curvature attribute used in 3D interpretation (report Sec 8.6.4: "
+                        "\"computed from the second derivatives of the surface's time or depth "
+                        "values\"; here from the single lateral direction a 2D line has)."
                     )
                     horizon_time = interpolate_horizon(h.picks, cdp_list)
                     kappa = horizon_curvature(horizon_time, cdp_list, survey.group_interval)
@@ -118,7 +302,11 @@ def render():
                         kappa, cdp_list, title=f"Curvature — '{name}'", colorbar_title="Curvature (1/m)"),
                         theme=None, key=f"h_curvature_{name}")
 
+    # =====================================================================
+    # 3) FAULT INTERPRETATION
+    # =====================================================================
     with tab_fault:
+        _step_caption(2)
         c1, c2 = st.columns([3, 1])
         new_fname = c1.text_input("New fault name", placeholder="e.g. Fault A", key="new_fault_name")
         if c2.button("Add fault") and new_fname:
@@ -130,13 +318,19 @@ def render():
         else:
             fname = st.selectbox("Editing fault", list(faults.keys()))
             fl = faults[fname]
-            st.caption(click_help_caption() + " (points are kept in the order you add them)")
+            disp = controls.section_display_controls("fault_display", default_colorscale="Seismic")
 
             fig = interpretation_plots.plot_section_with_picks(
-                section, cdp_list, twt, horizons={}, faults=faults, title=section_label)
-            event = st.plotly_chart(fig, on_select="rerun", selection_mode="points",
-                                     key=f"f_click_{fname}", theme=None)
-            new_pt = consume_new_click(event, f"f_dedup_{fname}")
+                section, cdp_list, twt, horizons={}, faults=faults, title=section_label,
+                colorscale=disp.colorscale, equalize=disp.equalize)
+            st.plotly_chart(fig, theme=None, key=f"f_click_{fname}")
+            st.caption("🔍 Zoom in on the reflector offset/discontinuity above, then add each point "
+                        "along the fault trace below, in order from shallow to deep.")
+            new_pt = numeric_point_form(
+                f"f_pt_{fname}", "CDP", "Time (s)",
+                x_value=float(np.median(cdp_list)), y_value=float(twt[len(twt) // 3]),
+                x_min=float(min(cdp_list)), x_max=float(max(cdp_list)),
+                y_min=0.0, y_max=float(twt[-1]), x_step=1.0, y_step=0.005)
             if new_pt is not None:
                 cdp_clicked, t_clicked = new_pt
                 fl.points.append((_nearest_cdp(cdp_list, cdp_clicked), round(float(t_clicked), 4)))
@@ -159,59 +353,52 @@ def render():
                 del faults[fname]
                 st.rerun()
 
-    with tab_tie:
+    # =====================================================================
+    # 4) SURFACE (TIME/DEPTH) MAP GENERATION
+    # =====================================================================
+    with tab_map:
+        _step_caption(3)
         st.markdown(
-            "**Approximate well-to-seismic tie.** Upload a simple well-log CSV with columns "
-            "`depth_m`, `vp_m_s`, `rho_kg_m3` (density). A checkshot CSV (`depth_m`, `twt_s`) is "
-            "optional — without one, the depth-time conversion comes directly from integrating the "
-            "sonic log, the standard fallback. This computes a genuine reflectivity-and-convolution "
-            "synthetic; it does **not** extract a statistical wavelet from the seismic itself "
-            "(a Ricker wavelet at a frequency you choose is used instead) — see README for what a "
-            "fuller well-tie workflow would add."
+            "Report Sec 8.5: grids a picked horizon into a continuous surface and, given a velocity "
+            "model, converts it from two-way time to true depth. This app works with a single 2D "
+            "line rather than a 3D volume, so there is no areal grid to contour — the equivalent "
+            "quantity here is the horizon's time (or depth) value as a continuous **profile** along "
+            "the line, which is what's shown below, honestly labeled as a 2D line rather than a map."
         )
-        log_file = st.file_uploader("Well log CSV", type=["csv"], key="welllog_csv")
-        checkshot_file = st.file_uploader("Checkshot CSV (optional)", type=["csv"], key="checkshot_csv")
-        wavelet_freq = st.slider("Wavelet peak frequency (Hz)", 10.0, 80.0, 30.0, key="tie_freq")
-        tie_cdp = st.selectbox("Seismic trace to compare (nearest CDP)", cdp_list,
-                                index=len(cdp_list) // 2, key="tie_cdp")
-        shift_ms = st.slider("Manual bulk shift (ms)", -200, 200, 0, key="tie_shift")
+        if not horizons or not any(h.picks for h in horizons.values()):
+            st.info("Pick at least one horizon (previous tab) before generating a structure profile.", icon="ℹ️")
+        else:
+            picked_horizons = {n: h for n, h in horizons.items() if h.picks}
+            name = st.selectbox("Horizon", list(picked_horizons.keys()), key="map_horizon")
+            h = picked_horizons[name]
+            horizon_time = interpolate_horizon(h.picks, cdp_list)
 
-        if log_file is not None and st.button("Compute synthetic & tie", type="primary"):
-            try:
-                log_df = pd.read_csv(log_file)
-                required = {"depth_m", "vp_m_s", "rho_kg_m3"}
-                if not required.issubset(log_df.columns):
-                    st.error(f"Well log CSV must have columns {sorted(required)}.")
-                else:
-                    checkshot_df = pd.read_csv(checkshot_file) if checkshot_file is not None else None
-                    result = synthetic_seismogram(log_df["depth_m"].values, log_df["vp_m_s"].values,
-                                                   log_df["rho_kg_m3"].values, survey.sample_interval,
-                                                   wavelet_freq_hz=wavelet_freq, checkshot=checkshot_df,
-                                                   t_max_s=survey.record_length)
-                    st.session_state["synthetic_tie"] = result
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Couldn't build the synthetic: {e}")
+            st.plotly_chart(interpretation_plots.plot_structure_profile(
+                horizon_time, cdp_list, y_title="TWT (s)",
+                title=f"Time Structure Profile — '{name}'", color=h.color),
+                theme=None, key="map_time_profile")
 
-        result = st.session_state.get("synthetic_tie")
-        if result is not None:
-            import plotly.graph_objects as go
-            from visualization import theme
-            g = st.session_state["gathers"][tie_cdp]
-            seismic_trace = g.get("stack_dmo", g["traces"].mean(axis=0))
-            shift_s = shift_ms / 1000.0
-            synth_shifted = np.interp(result["time_axis"] - shift_s, result["time_axis"],
-                                       result["synthetic_trace"], left=0, right=0)
-            syn_n = synth_shifted / (np.max(np.abs(synth_shifted)) + 1e-9)
-            sei_n = seismic_trace / (np.max(np.abs(seismic_trace)) + 1e-9)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=syn_n, y=result["time_axis"], name="Synthetic", line=dict(color="#c62828")))
-            fig.add_trace(go.Scatter(x=sei_n, y=twt[:len(sei_n)], name=f"Seismic (CDP {tie_cdp})",
-                                      line=dict(color="#0D2B5E")))
-            fig.update_layout(**theme.base_layout("Synthetic-to-Seismic Tie", 600))
-            fig.update_xaxes(**theme.x_axis("Normalized amplitude"))
-            fig.update_yaxes(**theme.time_axis())
-            st.plotly_chart(fig, theme=None, key="tie_chart")
-            st.caption("Adjust the manual bulk shift above until the strongest synthetic events line "
-                        "up with the strongest seismic events, then read off the shift as your "
-                        "check on the depth-time relationship.")
+            st.divider()
+            st.markdown("**Time-to-depth conversion** (report Eq. 8.5: `Z = Vavg(t) * t / 2`).")
+            vfield = st.session_state.get("Vfield_2")
+            vel_source = st.radio("Average velocity source",
+                                    ["Constant (enter a value)", "From RMS velocity field (Pass 2)"]
+                                    if vfield is not None else ["Constant (enter a value)"],
+                                    key="map_vel_source", horizontal=True)
+            if vel_source.startswith("Constant"):
+                v_avg = st.slider("Average velocity (m/s)", 1500.0, 5500.0, 2800.0, step=50.0, key="map_vavg")
+                depth = v_avg * horizon_time / 2.0
+            else:
+                dt = survey.sample_interval
+                t_idx = np.clip(np.round(horizon_time / dt).astype(int), 0, vfield.shape[0] - 1)
+                cdp_idx = np.arange(len(cdp_list))
+                v_at_horizon = vfield[t_idx, cdp_idx]
+                depth = v_at_horizon * horizon_time / 2.0
+            st.plotly_chart(interpretation_plots.plot_structure_profile(
+                depth, cdp_list, y_title="Depth (m, TVDSS-equivalent)",
+                title=f"Depth Structure Profile — '{name}'", color="#8B5E00"),
+                theme=None, key="map_depth_profile")
+
+            out_df = pd.DataFrame({"cdp": cdp_list, "twt_s": horizon_time, "depth_m": depth})
+            st.download_button("Download structure profile (CSV)", out_df.to_csv(index=False),
+                                file_name=f"structure_profile_{name}.csv", mime="text/csv")

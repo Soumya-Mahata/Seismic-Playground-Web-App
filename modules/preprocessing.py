@@ -277,6 +277,42 @@ def apply_top_bottom_mute(data: np.ndarray, dt: float, t_top: float = 0.05,
     return data * mask
 
 
+def apply_linear_mute(data: np.ndarray, offsets: np.ndarray, dt: float, velocity: float,
+                       t_intercept: float = 0.0, taper_s: float = 0.05) -> tuple:
+    """Offset-dependent (linear-moveout) mute: zeroes each trace before
+    `t_mute(x) = t_intercept + |offset| / velocity`, with a cosine taper,
+    rather than the same fixed time on every trace.
+
+    This is the correct mute geometry for removing a direct arrival or
+    ground-roll cone, whose arrival time increases roughly linearly with
+    offset (report Sec 5.2.2 "the direct wave", Sec 5.11 "ground roll").
+    A single global top-mute time (`apply_top_bottom_mute`) cannot follow
+    that moveout at all — it either mutes too little at far offsets (the
+    cone is still there) or too much at near offsets (killing real
+    shallow reflections), which is exactly the bug this fixes: the old
+    mute step used a flat cutoff regardless of offset and so visibly
+    never touched the diagonal noise trend in a full shot gather.
+
+    Returns (muted_data, mute_times) where `mute_times` is one cutoff
+    time per trace, for QC overlay on the section display.
+    """
+    n_tr, ns = data.shape
+    time = np.arange(ns) * dt
+    mute_times = np.maximum(0.0, t_intercept + np.abs(offsets) / max(velocity, 1e-6))
+    it_tap = max(1, int(round(taper_s / dt)))
+    out = np.empty_like(data, dtype=float)
+    for i in range(n_tr):
+        it = int(round(mute_times[i] / dt))
+        mask = np.ones(ns)
+        lo = min(max(0, it - it_tap), ns)
+        hi = min(max(it, lo), ns)
+        mask[:lo] = 0.0
+        if hi > lo:
+            mask[lo:hi] = 0.5 * (1 - np.cos(np.linspace(0, np.pi, hi - lo)))
+        out[i, :] = data[i, :] * mask
+    return out, mute_times
+
+
 def mute_mask(ns: int, dt: float, t_top: float = 0.05, t_bottom: float | None = None,
               taper_s: float = 0.05) -> np.ndarray:
     """Return the 1-D mute mask itself (used to re-apply the same mute to

@@ -22,9 +22,9 @@ STAGE_STATE_KEYS = {
     "upload": ["survey"],
     "shot_gathers": ["shot_gathers"],
     "bandpass": [],   # per-gather keys live inside shot_gathers[id][...], overwritten in place
-    "agc": [],
+    "agc": ["agc_config"],
     "trace_edit": [],
-    "mute": [],
+    "mute": ["mute_config"],
     "balance": [],
     "fk": ["fk_polygon"],
     "mult_supp": [],
@@ -35,13 +35,14 @@ STAGE_STATE_KEYS = {
     "statics": ["shot_static", "receiver_static", "static_diag"],
     "dmo": [],
     "inv_nmo": [],
+    "data_reg": ["regular_offsets"],
     "vel2": ["Vfield_2", "analysis_2", "vel_results_2"],
     "nmo_final": [],
     "stack": ["stack_matrix", "fold_matrix", "naive_matrix"],
     "rna": ["stack_rna"],
     "decon_post": ["stack_decon_post"],
     "tvf": ["stack_tvf"],
-    "migration": ["stack_migrated"],
+    "migration": ["stack_migrated", "pstm_image", "pstm_fold"],
     "final_scale": ["stack_final"],
 }
 
@@ -71,6 +72,11 @@ SESSION_DEFAULTS: Dict[str, Any] = {
     "fk_polygon": None,
     "fk_click_points": [],
     "_semblance_preview": None,
+    "agc_config": None,
+    "mute_config": None,
+    "regular_offsets": None,
+    "pstm_image": None,
+    "pstm_fold": None,
 }
 
 

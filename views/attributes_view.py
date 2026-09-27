@@ -21,7 +21,10 @@ def _best_available_section():
 
 def render():
     st.header("🧬 Seismic Attributes")
-    st.caption("Standard Hilbert-transform-based instantaneous attributes, computed on the processed section.")
+    st.caption("Step 5 of the interpretation workflow (report Ch.8.6) — Well Tie → Horizon Picking → "
+                "Fault Interpretation → Surface Map (see the **Interpretation** page) → **Attribute "
+                "Analysis**. Standard Hilbert-transform-based instantaneous attributes, computed on "
+                "the processed section.")
 
     section, section_label = _best_available_section()
     if section is None:

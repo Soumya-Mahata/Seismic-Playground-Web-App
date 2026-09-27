@@ -25,15 +25,27 @@ from visualization import theme
 def plot_section(section: np.ndarray, x_values: np.ndarray, twt: np.ndarray, *,
                   title: str = "", x_title: str = "CDP", pclip: float = cfg.PCLIP_DEFAULT,
                   colorscale: str = None, height: int = 550,
-                  gain: float = 1.0) -> go.Figure:
+                  gain: float = 1.0, equalize: bool = False) -> go.Figure:
     """Standard seismic-section image display: time down, CDP/trace
-    across, symmetric percentile amplitude clip, diverging colormap."""
-    colorscale = colorscale or theme.SEISMIC_COLORSCALE
+    across, symmetric percentile amplitude clip, diverging colormap.
+
+    `colorscale` is resolved through `theme.resolve_colorscale` so a bare
+    name like "Seismic" (or "seismic") always becomes a real Plotly-
+    understood colorscale — passing that string straight through is what
+    used to crash with `ValueError: Invalid value ... colorscale`.
+    `equalize` applies a per-trace *display-only* amplitude normalization
+    (see `theme.equalize_traces`) before clipping, which is usually what
+    makes a variable-density image of early/raw data actually look like a
+    seismic section instead of a faint, mostly-blank field.
+    """
+    colorscale = theme.resolve_colorscale(colorscale or theme.SEISMIC_COLORSCALE)
     data = np.nan_to_num(section, nan=0.0) * gain
+    if equalize:
+        data = theme.equalize_traces(data, pclip=95.0)
     clip = theme.percentile_clip(data, pclip)
     fig = go.Figure(go.Heatmap(
-        z=data.T, x=x_values, y=twt, zmin=-clip, zmax=clip, colorscale=colorscale,
-        colorbar=dict(title="Amplitude", **theme.COLORBAR),
+        z=data.T, x=x_values, y=twt, zmin=-clip, zmax=clip, colorscale=colorscale, zmid=0.0,
+        zsmooth="best", colorbar=dict(title="Amplitude", **theme.COLORBAR),
     ))
     fig.update_layout(**theme.base_layout(title, height))
     fig.update_xaxes(**theme.x_axis(x_title))
@@ -43,27 +55,41 @@ def plot_section(section: np.ndarray, x_values: np.ndarray, twt: np.ndarray, *,
 
 def plot_gather(traces: np.ndarray, offsets: np.ndarray, twt: np.ndarray, *,
                  title: str = "", pclip: float = cfg.PCLIP_DEFAULT, colorscale: str = None,
-                 height: int = 550) -> go.Figure:
+                 height: int = 550, equalize: bool = False) -> go.Figure:
     """A single CDP gather, offset on x."""
     order = np.argsort(offsets)
     return plot_section(traces[order], offsets[order], twt, title=title,
-                         x_title="Offset (m)", pclip=pclip, colorscale=colorscale, height=height)
+                         x_title="Offset (m)", pclip=pclip, colorscale=colorscale, height=height,
+                         equalize=equalize)
 
 
 def plot_before_after(before: np.ndarray, after: np.ndarray, x_values: np.ndarray, twt: np.ndarray, *,
                        title_before: str = "Before", title_after: str = "After",
-                       x_title: str = "CDP", pclip: float = cfg.PCLIP_DEFAULT, height: int = 550) -> go.Figure:
+                       x_title: str = "CDP", pclip: float = cfg.PCLIP_DEFAULT, height: int = 550,
+                       colorscale: str = None, equalize: bool = False,
+                       x_values_after: np.ndarray = None) -> go.Figure:
     """Side-by-side before/after section comparison sharing one clip
-    level (computed from the "after" section) and one time axis."""
-    clip = theme.percentile_clip(np.nan_to_num(after, nan=0.0), pclip)
+    level (computed from the "after" section) and one time axis.
+    `x_values_after` lets the two panels use different x-axes (e.g. a
+    regularized offset grid with a different trace count than the
+    original) — defaults to `x_values` when the two panels share the
+    same trace positions."""
+    x_values_after = x_values if x_values_after is None else x_values_after
+    colorscale = theme.resolve_colorscale(colorscale or theme.SEISMIC_COLORSCALE)
+    before_d = np.nan_to_num(before, nan=0.0)
+    after_d = np.nan_to_num(after, nan=0.0)
+    if equalize:
+        before_d = theme.equalize_traces(before_d, pclip=95.0)
+        after_d = theme.equalize_traces(after_d, pclip=95.0)
+    clip = theme.percentile_clip(after_d, pclip) or theme.percentile_clip(before_d, pclip)
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True,
                          subplot_titles=(f"<b>{title_before}</b>", f"<b>{title_after}</b>"),
                          horizontal_spacing=0.06)
-    fig.add_trace(go.Heatmap(z=np.nan_to_num(before, nan=0.0).T, x=x_values, y=twt,
-                              zmin=-clip, zmax=clip, colorscale=theme.SEISMIC_COLORSCALE,
+    fig.add_trace(go.Heatmap(z=before_d.T, x=x_values, y=twt,
+                              zmin=-clip, zmax=clip, colorscale=colorscale, zmid=0.0, zsmooth="best",
                               showscale=False), row=1, col=1)
-    fig.add_trace(go.Heatmap(z=np.nan_to_num(after, nan=0.0).T, x=x_values, y=twt,
-                              zmin=-clip, zmax=clip, colorscale=theme.SEISMIC_COLORSCALE,
+    fig.add_trace(go.Heatmap(z=after_d.T, x=x_values_after, y=twt,
+                              zmin=-clip, zmax=clip, colorscale=colorscale, zmid=0.0, zsmooth="best",
                               colorbar=dict(title="Amplitude", **theme.COLORBAR)), row=1, col=2)
     fig.update_layout(**theme.base_layout(title="", height=height))
     for c in (1, 2):
@@ -75,13 +101,43 @@ def plot_before_after(before: np.ndarray, after: np.ndarray, x_values: np.ndarra
     return fig
 
 
+def plot_mute_qc(traces: np.ndarray, x_positions: np.ndarray, twt: np.ndarray,
+                  mute_times: np.ndarray, *, title: str = "Mute QC", x_title: str = "Receiver station",
+                  pclip: float = cfg.PCLIP_DEFAULT, colorscale: str = None, height: int = 550,
+                  equalize: bool = True) -> go.Figure:
+    """Section display with the mute cutoff time (one value per trace)
+    drawn as an explicit line, so it is unambiguous exactly which part of
+    the data a mute removed — the QC the mute step was missing entirely
+    (a before/after pair that looks identical gives no way to see *where*
+    the cut actually is)."""
+    fig = plot_section(traces, x_positions, twt, title=title, x_title=x_title, pclip=pclip,
+                        colorscale=colorscale, height=height, equalize=equalize)
+    order = np.argsort(x_positions)
+    fig.add_trace(go.Scatter(x=np.asarray(x_positions)[order], y=np.asarray(mute_times)[order],
+                              mode="lines", line=dict(color="#111111", width=2.5, dash="dash"),
+                              name="Mute cutoff"))
+    fig.update_layout(showlegend=True)
+    return fig
+
+
 def plot_variable_density_with_wiggle(traces: np.ndarray, x_positions: np.ndarray, twt: np.ndarray, *,
-                                       title: str = "", max_traces: int = 40, pclip: float = cfg.PCLIP_DEFAULT,
-                                       colorscale: str = None, height: int = 600) -> go.Figure:
+                                       title: str = "", max_traces: int = 60, pclip: float = cfg.PCLIP_DEFAULT,
+                                       colorscale: str = None, height: int = 600,
+                                       equalize: bool = True) -> go.Figure:
     """Variable-density (color image) background with wiggle traces
     overlaid — "VD+WT" display, a standard industry combination that
     shows both the continuous amplitude field and individual trace
-    shape at once. Same `max_traces` safety cap as `plot_wiggle_va`."""
+    shape at once. Same `max_traces` safety cap as `plot_wiggle_va`.
+
+    `equalize` defaults to True here (unlike `plot_section`): a raw or
+    early-stage gather commonly spans a huge dynamic range across offset
+    (near-trace amplitude can be 10-100x a far trace before AGC), and a
+    single global clip level leaves most of a VD image looking blank —
+    exactly the "doesn't look like a seismic section" complaint. This is
+    a display-only per-trace balance, identical in spirit to a
+    workstation's "display AGC" toggle; it never touches the processing
+    data returned to the caller.
+    """
     n = min(traces.shape[0], max_traces)
     traces_w = traces[:n]
     x_positions = np.asarray(x_positions[:n], dtype=float)
@@ -89,20 +145,21 @@ def plot_variable_density_with_wiggle(traces: np.ndarray, x_positions: np.ndarra
     trace_spacing = float(np.median(diffs)) if len(diffs) and np.median(diffs) > 0 else 1.0
 
     fig = plot_section(traces_w, x_positions, twt, title=title, pclip=pclip,
-                        colorscale=colorscale, height=height)
-    peak = np.percentile(np.abs(traces_w), 98) or 1.0
+                        colorscale=colorscale, height=height, equalize=equalize)
+    disp = theme.equalize_traces(traces_w, pclip=95.0) if equalize else traces_w
+    peak = np.percentile(np.abs(disp), 98) or 1.0
     scale = 0.45 * trace_spacing / peak
     for i in range(n):
-        x = x_positions[i] + traces_w[i] * scale
+        x = x_positions[i] + disp[i] * scale
         fig.add_trace(go.Scatter(x=x, y=twt, mode="lines", line=dict(width=0.8, color="black"),
-                                  showlegend=False, hoverinfo="skip", opacity=0.7))
+                                  showlegend=False, hoverinfo="skip", opacity=0.75))
     return fig
 
 
 def plot_wiggle_va(traces: np.ndarray, x_positions: np.ndarray, twt: np.ndarray, *,
-                    title: str = "", max_traces: int = 40, trace_spacing: Optional[float] = None,
-                    fill_color: str = "rgba(13,43,94,0.65)", line_color: str = "#0D2B5E",
-                    height: int = 600) -> go.Figure:
+                    title: str = "", max_traces: int = 60, trace_spacing: Optional[float] = None,
+                    fill_color: str = "rgba(13,43,94,0.75)", line_color: str = "#0D2B5E",
+                    height: int = 600, equalize: bool = False) -> go.Figure:
     """Classic wiggle + variable-area trace display. Only sensible for a
     modest number of traces at once (a "trace viewer" window), so the
     caller should pass an already-windowed subset — traces beyond
@@ -112,6 +169,8 @@ def plot_wiggle_va(traces: np.ndarray, x_positions: np.ndarray, twt: np.ndarray,
     n = min(traces.shape[0], max_traces)
     traces = traces[:n]
     x_positions = np.asarray(x_positions[:n], dtype=float)
+    if equalize:
+        traces = theme.equalize_traces(traces, pclip=95.0)
     if trace_spacing is None:
         diffs = np.diff(np.sort(x_positions))
         trace_spacing = float(np.median(diffs)) if len(diffs) and np.median(diffs) > 0 else 1.0
@@ -144,19 +203,53 @@ def plot_fk_spectrum(f: np.ndarray, k: np.ndarray, magnitude: np.ndarray, *,
                       height: int = 550) -> go.Figure:
     """F-K amplitude spectrum display (log-scaled magnitude) with an
     optional reject-polygon overlay — used both for passive F-K QC and
-    for manual (click-to-draw) polygon definition."""
+    for manual polygon definition. The polygon marks the region that is
+    REJECTED (attenuated); everything outside it is passed."""
     mag_db = 20 * np.log10(magnitude.T + 1e-6)
     mag_db -= mag_db.max()
-    fig = go.Figure(go.Heatmap(z=mag_db, x=k, y=f, colorscale="Viridis", zmin=-60, zmax=0,
+    fig = go.Figure(go.Heatmap(z=mag_db, x=k, y=f, colorscale="Viridis", zmin=-60, zmax=0, zsmooth="best",
                                 colorbar=dict(title="dB", **theme.COLORBAR)))
     if polygon_points and len(polygon_points) >= 1:
         pts = list(polygon_points) + ([polygon_points[0]] if len(polygon_points) >= 3 else [])
         fig.add_trace(go.Scatter(x=[p[0] for p in pts], y=[p[1] for p in pts], mode="lines+markers",
                                   line=dict(color="#ef4444", width=2.5), marker=dict(size=8, color="#ef4444"),
-                                  name="Reject polygon"))
-    fig.update_layout(**theme.base_layout(title, height))
+                                  fill="toself", fillcolor="rgba(239,68,68,0.15)",
+                                  name="Reject polygon (attenuated)"))
+    fig.update_layout(**theme.base_layout(title, height), showlegend=bool(polygon_points))
     fig.update_xaxes(**theme.x_axis("Wavenumber k (cycles/m)"))
     fig.update_yaxes(**theme.x_axis("Frequency (Hz)"))
+    return fig
+
+
+def plot_fk_before_after(f: np.ndarray, k: np.ndarray, mag_before: np.ndarray, mag_after: np.ndarray, *,
+                          polygon_points: list | None = None, height: int = 500) -> go.Figure:
+    """Side-by-side F-K amplitude spectra before/after applying the
+    reject-polygon mask — the direct QC for "is the filter actually
+    removing the ground-roll energy inside the polygon and leaving
+    everything else alone", which a single spectrum plot cannot show."""
+    db_before = 20 * np.log10(mag_before.T + 1e-6)
+    db_before -= db_before.max()
+    db_after = 20 * np.log10(mag_after.T + 1e-6)
+    db_after -= db_after.max()
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True,
+                         subplot_titles=("<b>F-K spectrum — before</b>", "<b>F-K spectrum — after</b>"),
+                         horizontal_spacing=0.08)
+    fig.add_trace(go.Heatmap(z=db_before, x=k, y=f, colorscale="Viridis", zmin=-60, zmax=0,
+                              zsmooth="best", showscale=False), row=1, col=1)
+    fig.add_trace(go.Heatmap(z=db_after, x=k, y=f, colorscale="Viridis", zmin=-60, zmax=0, zsmooth="best",
+                              colorbar=dict(title="dB", **theme.COLORBAR)), row=1, col=2)
+    if polygon_points and len(polygon_points) >= 3:
+        pts = list(polygon_points) + [polygon_points[0]]
+        for col in (1, 2):
+            fig.add_trace(go.Scatter(x=[p[0] for p in pts], y=[p[1] for p in pts], mode="lines",
+                                      line=dict(color="#ef4444", width=2), showlegend=False),
+                          row=1, col=col)
+    fig.update_layout(**theme.base_layout("", height))
+    for c in (1, 2):
+        fig.update_xaxes(**theme.x_axis("Wavenumber k (cycles/m)"), row=1, col=c)
+    fig.update_yaxes(**theme.x_axis("Frequency (Hz)"), row=1, col=1)
+    for ann in fig.layout.annotations:
+        ann.font = dict(size=13, color=theme.TITLE_BLUE)
     return fig
 
 

@@ -14,6 +14,9 @@ pandas
 # SEG-Y I/O (read + write)
 segyio
 
+# Well-log I/O — LAS files for the well-to-seismic tie (CSV works without it)
+lasio
+
 # Visualization
 plotly
 matplotlib   # only used for its Path/polygon-containment test in the F-K filter mask

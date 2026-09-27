@@ -14,13 +14,14 @@ afterward, in `views/cdp_sort_view.py`.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 import config as cfg
 from modules import filtering, preprocessing
 from utils import session_state as ss
-from utils.click_picking import click_help_caption, consume_new_click
-from visualization import seismic_plots, spectra_plots
+from utils.click_picking import numeric_point_form
+from visualization import controls, seismic_plots, spectra_plots
 
 
 def _example_shot_selector(shot_list, key):
@@ -39,6 +40,25 @@ def render():
     survey = st.session_state["survey"]
     dt = survey.sample_interval
     twt = survey.twt
+
+    n_traces_in_shots = sum(g["traces"].shape[0] for g in shot_gathers.values())
+    with st.expander(f"Trace-count check: {n_traces_in_shots:,} traces across {len(shot_list)} shots "
+                      f"(survey has {survey.num_traces:,})", expanded=False):
+        st.markdown(
+            "The data was already in the shot domain, so every step in this page runs **in place** "
+            "on each shot's `(channels, samples)` array — no step here concatenates, duplicates, or "
+            "re-sorts traces, so this total should stay exactly the same through every tab below. "
+            "If a shot has a split-spread layout (receivers on both sides of the source), its channel "
+            "count is roughly `2 x channels-per-side` by design (see the survey-generation settings) "
+            "— that is a real split-spread geometry, not a duplication bug."
+        )
+        counts = pd.DataFrame({"stage": ["Survey (all traces)", "Sum across shot gathers"],
+                                "traces": [survey.num_traces, n_traces_in_shots]})
+        st.dataframe(counts, hide_index=True)
+        if n_traces_in_shots != survey.num_traces:
+            st.warning("⚠️ These two totals differ — some traces were dropped when building shot "
+                        "gathers (e.g. a minimum-fold filter) or the shot-grouping key doesn't cover "
+                        "every trace. This is worth checking against the survey's FieldRecord header.")
 
     tabs = st.tabs(["1. Band-Pass Filter", "2. Amplitude Recovery", "3. Trace Edit/Kill/De-spike",
                     "4. Top Mute", "5. Trace Balancing", "6. F-K Filter", "7. Multiple Suppression",
@@ -68,9 +88,11 @@ def render():
             g = shot_gathers[shot]
             st.plotly_chart(spectra_plots.plot_spectrum_comparison(
                 g["traces"], g["traces_bp"], dt, title="Spectrum — Band-Pass Filter"), theme=None, key="bp_spectrum")
+            disp = controls.section_display_controls("bp_display", default_colorscale="Seismic")
             st.plotly_chart(seismic_plots.plot_before_after(
                 g["traces"], g["traces_bp"], g["receiver_ids"], twt,
-                title_before="Raw shot", title_after="After band-pass", x_title="Receiver station"),
+                title_before="Raw shot", title_after="After band-pass", x_title="Receiver station",
+                colorscale=disp.colorscale, equalize=disp.equalize),
                 theme=None, key="bp_before_after")
 
     # ---- 2) Amplitude recovery (AGC) --------------------------------
@@ -79,7 +101,10 @@ def render():
             pass
         else:
             st.markdown("Sliding-window automatic gain control compensates for amplitude decay "
-                         "with time (spherical divergence + intrinsic attenuation).")
+                         "with time (spherical divergence + intrinsic attenuation). Only **one** "
+                         "AGC configuration is ever active at a time — running this again with new "
+                         "parameters replaces the version every later step uses; there is no hidden "
+                         "second copy floating around.")
             window = st.slider("AGC window (samples)", 20, 800, cfg.AGC_WINDOW_DEFAULT, key="agc_window")
             mode = st.radio("Statistic", ["rms", "mean", "median"],
                              index=["rms", "mean", "median"].index(cfg.AGC_MODE_DEFAULT),
@@ -87,15 +112,22 @@ def render():
             if st.button("Run amplitude recovery", type="primary", key="run_agc"):
                 for g in shot_gathers.values():
                     g["traces_agc"] = preprocessing.agc(g["traces_bp"], window=window, mode=mode)
+                st.session_state["agc_config"] = {"window": window, "mode": mode}
                 ss.mark_stage_done("agc", {"window": window, "mode": mode})
                 st.rerun()
             if ss.is_stage_done("agc"):
-                st.success("✅ Amplitude recovery applied.")
+                cfg_active = st.session_state.get("agc_config") or {}
+                st.success(f"✅ Amplitude recovery applied — **active version: {cfg_active.get('mode', '?').upper()} "
+                            f"AGC, window={cfg_active.get('window', '?')} samples**. This is the version every "
+                            f"later step (trace edit, mute, F-K, ..., stacking) uses; it also appears in the "
+                            f"sidebar for the rest of the workflow.")
                 shot = _example_shot_selector(shot_list, "agc_shot")
                 g = shot_gathers[shot]
+                disp = controls.section_display_controls("agc_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
                     g["traces_bp"], g["traces_agc"], g["receiver_ids"], twt,
-                    title_before="Before AGC", title_after="After AGC", x_title="Receiver station"),
+                    title_before="Before AGC", title_after="After AGC", x_title="Receiver station",
+                    colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="agc_before_after")
 
     # ---- 3) Trace edit / kill / de-spike ----------------------------
@@ -103,63 +135,150 @@ def render():
         if not ss.require_stage("agc"):
             pass
         else:
-            st.markdown("**De-spiking** removes burst-noise transients (electronic glitches, blast "
-                         "interference) sample-by-sample. **Trace edit/kill** flags and zeros whole "
-                         "traces that are dead (near-zero energy) or abnormally noisy — the standard "
-                         "early noise-attenuation QC step, run before ground-roll/multiple attenuation.")
+            st.markdown("Two separate, sequential operations — run and QC'd independently so it's "
+                         "obvious each one is actually doing something to the data, not just a single "
+                         "opaque combined button:")
+            st.markdown("**3a. De-spiking** — removes burst-noise transients (electronic glitches, "
+                         "blast interference) sample-by-sample, replacing only the flagged samples "
+                         "with the local median (an isolation check keeps this from misfiring on real, "
+                         "sharp reflection peaks — see `modules/preprocessing.despike_traces`).")
             c1, c2 = st.columns(2)
             spike_window = c1.slider("De-spike window (samples)", 5, 60, 15, key="spike_window")
             spike_thresh = c2.slider("De-spike threshold (x robust noise level)", 3.0, 15.0, 6.0, key="spike_thresh")
-            c1, c2 = st.columns(2)
-            dead_frac = c1.slider("Dead-trace energy threshold (x median)", 0.001, 0.2, 0.02, key="dead_frac")
-            noisy_mult = c2.slider("Noisy-trace energy threshold (x median)", 3.0, 30.0, 8.0, key="noisy_mult")
-            if st.button("Run trace edit / kill / de-spike", type="primary", key="run_edit"):
-                total_killed = 0
+            if st.button("Run de-spike", type="primary", key="run_despike"):
+                total_spikes = 0
                 for g in shot_gathers.values():
                     cleaned, spike_mask = preprocessing.despike_traces(g["traces_agc"], spike_window, spike_thresh)
-                    flags = preprocessing.flag_bad_traces(cleaned, dead_frac, noisy_mult)
-                    g["traces_edited"] = preprocessing.apply_trace_kill(cleaned, flags["kill"])
-                    g["_kill_flags"] = flags
+                    g["traces_despiked"] = cleaned
                     g["_spike_mask"] = spike_mask
-                    total_killed += int(flags["kill"].sum())
-                ss.mark_stage_done("trace_edit", {"traces_killed": total_killed})
+                    total_spikes += int(spike_mask.sum())
+                st.session_state["_despike_total"] = total_spikes
                 st.rerun()
+
+            despike_done = all("traces_despiked" in g for g in shot_gathers.values())
+            if despike_done:
+                st.success(f"✅ De-spike applied — {st.session_state.get('_despike_total', 0)} sample(s) "
+                            f"flagged and replaced across all shots.")
+                shot = _example_shot_selector(shot_list, "despike_shot")
+                g = shot_gathers[shot]
+                n_spikes_shot = int(g["_spike_mask"].sum())
+                st.caption(f"{n_spikes_shot} spike sample(s) flagged in shot {shot} "
+                            f"(marked below with ×).")
+                disp = controls.section_display_controls("despike_display", default_colorscale="Seismic")
+                fig = seismic_plots.plot_before_after(
+                    g["traces_agc"], g["traces_despiked"], g["receiver_ids"], twt,
+                    title_before="Before de-spike", title_after="After de-spike", x_title="Receiver station",
+                    colorscale=disp.colorscale, equalize=disp.equalize)
+                if n_spikes_shot:
+                    rows, cols = np.nonzero(g["_spike_mask"])
+                    import plotly.graph_objects as go
+                    fig.add_trace(go.Scatter(x=g["receiver_ids"][rows], y=twt[cols], mode="markers",
+                                              marker=dict(symbol="x", size=6, color="#f59e0b"),
+                                              name="Flagged spikes", showlegend=True), row=1, col=2)
+                st.plotly_chart(fig, theme=None, key="despike_before_after")
+
+                st.divider()
+                st.markdown("**3b. Trace edit / kill** — flags and zeros whole traces that are dead "
+                             "(near-zero energy) or abnormally noisy relative to the gather's median "
+                             "trace energy, computed on the de-spiked data above.")
+                c1, c2 = st.columns(2)
+                dead_frac = c1.slider("Dead-trace energy threshold (x median)", 0.001, 0.5, 0.02, key="dead_frac")
+                noisy_mult = c2.slider("Noisy-trace energy threshold (x median)", 2.0, 30.0, 8.0, key="noisy_mult")
+                if st.button("Run trace kill", type="primary", key="run_kill"):
+                    total_killed = 0
+                    for g2 in shot_gathers.values():
+                        flags = preprocessing.flag_bad_traces(g2["traces_despiked"], dead_frac, noisy_mult)
+                        g2["traces_edited"] = preprocessing.apply_trace_kill(g2["traces_despiked"], flags["kill"])
+                        g2["_kill_flags"] = flags
+                        total_killed += int(flags["kill"].sum())
+                    st.session_state["_kill_total"] = total_killed
+                    ss.mark_stage_done("trace_edit", {"traces_killed": total_killed,
+                                                        "dead_frac": dead_frac, "noisy_mult": noisy_mult})
+                    st.rerun()
+
             if ss.is_stage_done("trace_edit"):
-                st.success("✅ Trace edit / kill / de-spike applied.")
+                st.success(f"✅ Trace kill applied — {st.session_state.get('_kill_total', 0)} "
+                            f"trace(s) zeroed across all shots.")
                 shot = _example_shot_selector(shot_list, "edit_shot")
                 g = shot_gathers[shot]
                 flags = g["_kill_flags"]
-                c1, c2, c3 = st.columns(3)
+                c1, c2 = st.columns(2)
                 c1.metric("Dead traces (this shot)", int(flags["dead"].sum()))
                 c2.metric("Noisy traces (this shot)", int(flags["noisy"].sum()))
-                c3.metric("Spikes removed (this shot)", int(g["_spike_mask"].sum()))
+                if flags["kill"].any():
+                    killed_ids = g["receiver_ids"][flags["kill"]]
+                    st.caption(f"Killed receiver station(s) in shot {shot}: {list(killed_ids)}")
+                disp2 = controls.section_display_controls("kill_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
-                    g["traces_agc"], g["traces_edited"], g["receiver_ids"], twt,
-                    title_before="Before edit", title_after="After edit/kill/de-spike", x_title="Receiver station"),
+                    g["traces_despiked"], g["traces_edited"], g["receiver_ids"], twt,
+                    title_before="Before kill", title_after="After kill (killed traces now flat)",
+                    x_title="Receiver station", colorscale=disp2.colorscale, equalize=disp2.equalize),
                     theme=None, key="edit_before_after")
 
-    # ---- 4) Top mute ---------------------------------------------------
+    # ---- 4) Mute --------------------------------------------------------
     with tabs[3]:
         if not ss.require_stage("trace_edit"):
             pass
         else:
-            st.markdown("A cosine-tapered top mute suppresses the direct arrival / pre-first-break "
-                         "noise, which has no reflection information.")
-            t_top = st.slider("Mute time (s)", 0.0, min(0.5, survey.record_length), cfg.MUTE_TTOP_DEFAULT,
-                               step=0.005, key="mute_ttop")
+            st.markdown(
+                "**Mute type** matters here: a constant (flat) top mute only removes the same early "
+                "time window on *every* trace regardless of offset — it does nothing to the direct "
+                "arrival / ground-roll cone, whose arrival time increases with offset (see the report, "
+                "Sec 5.2.2/5.11), so on a full-offset shot gather it visibly fails to touch that "
+                "diagonal noise trend at all. The **offset-dependent (linear moveout) mute** instead "
+                "follows a straight line `t_mute(x) = t0 + |offset| / v_mute` — the standard way to mute "
+                "a direct arrival/ground-roll cone that moves out linearly with offset.")
+            mute_type = st.radio("Mute type", ["Offset-dependent (linear moveout)", "Flat top mute (constant time)"],
+                                  key="mute_type", horizontal=True)
             taper = st.slider("Taper width (s)", 0.005, 0.3, cfg.MUTE_TAPER_DEFAULT, step=0.005, key="mute_taper")
-            if st.button("Run top mute", type="primary", key="run_mute"):
+
+            if mute_type == "Flat top mute (constant time)":
+                t_top = st.slider("Mute time (s)", 0.0, min(0.5, survey.record_length), cfg.MUTE_TTOP_DEFAULT,
+                                   step=0.005, key="mute_ttop")
+                mute_kwargs = dict(kind="flat", t_top=t_top, taper=taper)
+                summary = f"flat, t_top={t_top * 1000:.0f} ms"
+            else:
+                c1, c2 = st.columns(2)
+                v_mute = c1.slider("Mute velocity (m/s)", 200.0, 3000.0, 500.0, step=50.0, key="mute_velocity",
+                                    help="Should roughly match the apparent velocity of the direct "
+                                         "arrival / ground roll you want to remove — see its slope on "
+                                         "the QC plot below.")
+                t0_mute = c2.slider("Time intercept t0 (s)", 0.0, 0.3, 0.0, step=0.005, key="mute_t0")
+                mute_kwargs = dict(kind="linear", velocity=v_mute, t0=t0_mute, taper=taper)
+                summary = f"linear, v={v_mute:.0f} m/s, t0={t0_mute * 1000:.0f} ms"
+
+            if st.button("Run mute", type="primary", key="run_mute"):
                 for g in shot_gathers.values():
-                    g["traces_muted"] = preprocessing.apply_top_bottom_mute(g["traces_edited"], dt, t_top, taper_s=taper)
-                ss.mark_stage_done("mute", {"t_top_s": t_top, "taper_s": taper})
+                    if mute_kwargs["kind"] == "flat":
+                        muted = preprocessing.apply_top_bottom_mute(
+                            g["traces_edited"], dt, mute_kwargs["t_top"], taper_s=mute_kwargs["taper"])
+                        mute_times = np.full(g["traces_edited"].shape[0], mute_kwargs["t_top"])
+                    else:
+                        muted, mute_times = preprocessing.apply_linear_mute(
+                            g["traces_edited"], g["offsets"], dt, mute_kwargs["velocity"],
+                            t_intercept=mute_kwargs["t0"], taper_s=mute_kwargs["taper"])
+                    g["traces_muted"] = muted
+                    g["_mute_times"] = mute_times
+                st.session_state["mute_config"] = {**mute_kwargs, "summary": summary}
+                ss.mark_stage_done("mute", {"type": mute_kwargs["kind"], **{k: v for k, v in mute_kwargs.items() if k != "kind"}})
                 st.rerun()
+
             if ss.is_stage_done("mute"):
-                st.success("✅ Top mute applied.")
+                st.success(f"✅ Mute applied — **active mute: {summary}**.")
                 shot = _example_shot_selector(shot_list, "mute_shot")
                 g = shot_gathers[shot]
+                disp = controls.section_display_controls("mute_display", default_colorscale="Seismic")
+                st.markdown("**Before, with the mute cutoff line overlaid** — everything below/right "
+                             "of the dashed line is removed.")
+                st.plotly_chart(seismic_plots.plot_mute_qc(
+                    g["traces_edited"], g["receiver_ids"], twt, g["_mute_times"],
+                    title="Before mute (cutoff overlaid)", x_title="Receiver station",
+                    colorscale=disp.colorscale, equalize=disp.equalize),
+                    theme=None, key="mute_qc_overlay")
                 st.plotly_chart(seismic_plots.plot_before_after(
                     g["traces_edited"], g["traces_muted"], g["receiver_ids"], twt,
-                    title_before="Before", title_after="After mute", x_title="Receiver station"),
+                    title_before="Before", title_after="After mute", x_title="Receiver station",
+                    colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="mute_before_after")
 
     # ---- 5) Trace balancing ------------------------------------------
@@ -181,9 +300,11 @@ def render():
                 st.success("✅ Trace balancing applied.")
                 shot = _example_shot_selector(shot_list, "bal_shot")
                 g = shot_gathers[shot]
+                disp = controls.section_display_controls("bal_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
                     g["traces_muted"], g["traces_balanced"], g["receiver_ids"], twt,
-                    title_before="Before", title_after="After balancing", x_title="Receiver station"),
+                    title_before="Before", title_after="After balancing", x_title="Receiver station",
+                    colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="bal_before_after")
 
     # ---- 6) F-K filter (auto polygon or click-drawn) -----------------
@@ -193,8 +314,10 @@ def render():
         else:
             st.markdown("A 2-D FFT transforms a gather into frequency-wavenumber (F-K) space, "
                          "where coherent linear noise (ground roll) separates from reflections by "
-                         "its low apparent velocity — a polygon mask rejects that wedge before "
-                         "inverse-FFT.")
+                         "its low apparent velocity (report Sec 5.11/6.6). The red polygon below "
+                         "marks the region that is **rejected** (attenuated); everything outside it "
+                         "passes through unchanged, with a soft taper at the polygon edge to avoid "
+                         "ringing artifacts.")
             shot_fk = _example_shot_selector(shot_list, "fk_preview_shot")
             g_preview = shot_gathers[shot_fk]
             _, _, f_axis, k_axis, fk_before, _ = filtering.fk_filter_gather(
@@ -202,7 +325,7 @@ def render():
                 st.session_state["fk_polygon"] or cfg.FK_POLYGON_DEFAULT)
             magnitude = np.abs(fk_before)
 
-            poly_mode = st.radio("Reject-polygon source", ["Default polygon", "Draw my own (click on the plot)"],
+            poly_mode = st.radio("Reject-polygon source", ["Default polygon", "Build my own (numeric points)"],
                                   key="fk_poly_mode", horizontal=True)
 
             if poly_mode == "Default polygon":
@@ -212,13 +335,19 @@ def render():
                     title=f"F-K Spectrum — shot {shot_fk} (default reject polygon)"),
                     theme=None, key="fk_spectrum_default")
             else:
-                st.caption(click_help_caption() + " Needs at least 3 points to form a polygon.")
-                fig = seismic_plots.plot_fk_spectrum(
+                st.plotly_chart(seismic_plots.plot_fk_spectrum(
                     f_axis, k_axis, magnitude, polygon_points=st.session_state["fk_click_points"],
-                    title=f"F-K Spectrum — shot {shot_fk} (click to draw reject polygon)")
-                event = st.plotly_chart(fig, on_select="rerun", selection_mode="points",
-                                         key="fk_click_chart", theme=None)
-                new_pt = consume_new_click(event, "fk_click_dedup")
+                    title=f"F-K Spectrum — shot {shot_fk} (zoom in to read off coordinates)"),
+                    theme=None, key="fk_click_chart")
+                st.caption("Zoom into the spectrum above to read off (wavenumber, frequency) "
+                            "coordinates that trace the boundary of the ground-roll energy, then "
+                            "add each one below. (Streamlit can't deliver reliable click events on a "
+                            "heatmap-backed plot, so points are entered here instead of by clicking.)")
+                new_pt = numeric_point_form(
+                    "fk_pt", "Wavenumber k (cycles/m)", "Frequency (Hz)",
+                    x_value=0.0, y_value=float(f_axis.max()) * 0.3,
+                    x_min=float(k_axis.min()), x_max=float(k_axis.max()),
+                    y_min=0.0, y_max=float(f_axis.max()), x_step=0.001, y_step=1.0, x_format="%.4f")
                 if new_pt is not None:
                     st.session_state["fk_click_points"].append(new_pt)
                     st.rerun()
@@ -240,7 +369,7 @@ def render():
                 prog = st.progress(0.0, text="F-K filtering gathers...")
                 items = list(shot_gathers.items())
                 for i, (shot_id, g) in enumerate(items):
-                    filt, mask, f, k, fk, fkf = filtering.fk_filter_gather(
+                    filt, pass_mask, f, k, fk, fkf = filtering.fk_filter_gather(
                         g["traces_balanced"], dt, survey.group_interval, active_polygon)
                     g["traces_fk_filtered"] = filt
                     if i % 20 == 0:
@@ -253,9 +382,16 @@ def render():
                 st.success("✅ F-K filter applied.")
                 shot = _example_shot_selector(shot_list, "fk_shot")
                 g = shot_gathers[shot]
+                _, _, f_ax2, k_ax2, fk_b, fk_a = filtering.fk_filter_gather(
+                    g["traces_balanced"], dt, survey.group_interval, st.session_state["fk_polygon"])
+                st.plotly_chart(seismic_plots.plot_fk_before_after(
+                    f_ax2, k_ax2, np.abs(fk_b), np.abs(fk_a), polygon_points=st.session_state["fk_polygon"]),
+                    theme=None, key="fk_spectrum_before_after")
+                disp = controls.section_display_controls("fk_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
                     g["traces_balanced"], g["traces_fk_filtered"], g["receiver_ids"], twt,
-                    title_before="Before F-K", title_after="After F-K", x_title="Receiver station"),
+                    title_before="Before F-K", title_after="After F-K", x_title="Receiver station",
+                    colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="fk_before_after")
 
     # ---- 7) Multiple suppression (predictive/gap deconvolution) ------
@@ -297,9 +433,11 @@ def render():
                 st.success("✅ Multiple suppression applied.")
                 shot = _example_shot_selector(shot_list, "ms_shot")
                 g = shot_gathers[shot]
+                disp = controls.section_display_controls("ms_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
                     g["traces_fk_filtered"], g["traces_demultiple"], g["receiver_ids"], twt,
-                    title_before="Before", title_after="After multiple suppression", x_title="Receiver station"),
+                    title_before="Before", title_after="After multiple suppression", x_title="Receiver station",
+                    colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="ms_before_after")
 
     # ---- 8) Deconvolution (spiking) -----------------------------------
@@ -328,9 +466,11 @@ def render():
                             "Continue to **CDP Sort & Binning**.")
                 shot = _example_shot_selector(shot_list, "decon_shot")
                 g = shot_gathers[shot]
+                disp = controls.section_display_controls("decon_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
                     g["traces_demultiple"], g["traces_decon"], g["receiver_ids"], twt,
-                    title_before="Before decon", title_after="After decon", x_title="Receiver station"),
+                    title_before="Before decon", title_after="After decon", x_title="Receiver station",
+                    colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="decon_before_after")
                 st.plotly_chart(spectra_plots.plot_spectrum_comparison(
                     g["traces_demultiple"], g["traces_decon"], dt, label_before="Before", label_after="After",

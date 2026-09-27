@@ -1,21 +1,34 @@
 """
-utils/click_picking.py — Click-to-Pick Helper for Plotly Charts
+utils/click_picking.py — Point-Picking Helpers for Plotly Charts
 ====================================================================
-Requires Streamlit >= 1.35 (`st.plotly_chart(..., on_select="rerun")`).
+Why this no longer relies on click-on-the-chart
+------------------------------------------------
+Streamlit's `st.plotly_chart(..., on_select="rerun")` only delivers
+selection *events* for a handful of trace types — scatter/scattergl,
+bar, and histogram markers. It does **not** fire point-selection events
+for `go.Heatmap` traces (there is no per-cell "marker" for the browser
+to hit-test against the way there is for a scatter point), and every
+picker in this app (F-K polygon, horizon/fault picking, velocity
+semblance picking) is drawn on a Heatmap background. Practically, this
+means the old "click directly on the plot" instruction never actually
+worked for these panels — no error is raised, the callback is just
+never invoked.
 
-A single click on a Plotly chart triggers a script rerun with the
-clicked point's data coordinates available as
-`event.selection.points[-1]["x"/"y"]` (confirmed against the installed
-Streamlit's `PlotlySelectionState` schema — see
-`streamlit.elements.plotly_chart`). Each click *replaces* the prior
-selection rather than accumulating it, so building up a multi-point
-pick (a horizon, a fault line, an F-K polygon) requires tracking
-"have I already consumed this particular click" across reruns —
-that's what `consume_new_click` does.
+There's a second, more disruptive side effect: turning on
+`on_select=...` for a chart also switches Plotly's default *drag* mode
+from "zoom" to "select" for that chart, so dragging on the plot draws a
+selection rectangle instead of zooming — which is exactly the "it's
+neither clickable nor zoomable any more" regression. Removing
+`on_select` restores normal zoom/pan/box-zoom/double-click-to-reset
+behavior immediately.
 
-Used identically for horizon picking, fault picking, F-K polygon
-drawing, and manual velocity control points — one click-tracking
-mechanism, four different pages/purposes.
+The fix used throughout this app: keep the chart as a plain
+`st.plotly_chart(fig, theme=None)` (full native zoom/pan restored), and
+add a small, explicit "Add point" control (dropdown/number-input +
+button) beneath it instead of relying on a click event that this
+combination of chart type + Streamlit version cannot deliver. This is
+slower than a genuine click-to-pick would be, but it is honest and it
+reliably works, which a silently-broken click handler does not.
 """
 
 from __future__ import annotations
@@ -26,11 +39,12 @@ import streamlit as st
 
 
 def consume_new_click(event, dedup_key: str) -> Optional[Tuple[float, float]]:
-    """Return (x, y) of a newly-clicked chart point, or None if there's
-    no selection or it's the same click already consumed on a prior
-    rerun (Streamlit re-delivers the current selection on every rerun
-    until the person clicks again, so without de-duplication the same
-    point would be re-added on every unrelated interaction on the page).
+    """Kept for any chart built on a genuinely click-selectable trace
+    type (scatter/bar/histogram) that still wants on_select behavior.
+    Returns (x, y) of a newly-clicked point, or None if there's no
+    selection or it's the same click already consumed on a prior rerun.
+    Do NOT use this on a Heatmap-backed figure — see module docstring;
+    it will silently never fire.
     """
     try:
         points = event.selection.points if event is not None else []
@@ -50,5 +64,38 @@ def consume_new_click(event, dedup_key: str) -> Optional[Tuple[float, float]]:
 
 
 def click_help_caption() -> str:
-    return ("🖱️ Click directly on the plot to add a point. Each click adds one point; "
-            "use the controls below to undo or clear.")
+    return ("🔍 Zoom/pan freely on the plot below (drag to zoom, double-click to reset). "
+            "Add points precisely with the controls beneath it.")
+
+
+def numeric_point_form(key_prefix: str, x_label: str, y_label: str, *,
+                        x_value: float = 0.0, y_value: float = 0.0,
+                        x_min: Optional[float] = None, x_max: Optional[float] = None,
+                        y_min: Optional[float] = None, y_max: Optional[float] = None,
+                        x_step: float = 1.0, y_step: float = 0.01,
+                        x_format: Optional[str] = None, y_format: Optional[str] = None,
+                        button_label: str = "Add point") -> Optional[Tuple[float, float]]:
+    """A small (x, y) entry row + "Add point" button, replacing a click
+    on a chart that cannot deliver click events (see module docstring).
+    Returns (x, y) only on the run where the button was pressed."""
+    c1, c2, c3 = st.columns([2, 2, 1])
+    kwargs_x = dict(value=float(x_value), step=x_step, key=f"{key_prefix}_xval")
+    kwargs_y = dict(value=float(y_value), step=y_step, key=f"{key_prefix}_yval")
+    if x_min is not None:
+        kwargs_x["min_value"] = float(x_min)
+    if x_max is not None:
+        kwargs_x["max_value"] = float(x_max)
+    if y_min is not None:
+        kwargs_y["min_value"] = float(y_min)
+    if y_max is not None:
+        kwargs_y["max_value"] = float(y_max)
+    if x_format:
+        kwargs_x["format"] = x_format
+    if y_format:
+        kwargs_y["format"] = y_format
+    x = c1.number_input(x_label, **kwargs_x)
+    y = c2.number_input(y_label, **kwargs_y)
+    c3.markdown("&nbsp;")
+    if c3.button(button_label, key=f"{key_prefix}_addbtn"):
+        return (float(x), float(y))
+    return None

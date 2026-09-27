@@ -56,8 +56,9 @@ at.radio(key="active_page").set_value("⚙️ Pre-Stack Conditioning").run()
 check(at, "nav to Pre-Stack Conditioning")
 
 for run_key, label in [
-    ("run_bp", "Band-pass"), ("run_agc", "AGC"), ("run_edit", "Trace edit/kill/de-spike"),
-    ("run_mute", "Mute"), ("run_bal", "Balance"), ("run_fk", "F-K filter (default polygon)"),
+    ("run_bp", "Band-pass"), ("run_agc", "AGC"), ("run_despike", "De-spike"),
+    ("run_kill", "Trace kill"), ("run_mute", "Mute"), ("run_bal", "Balance"),
+    ("run_fk", "F-K filter (default polygon)"),
     ("run_ms", "Multiple suppression"), ("run_decon", "Deconvolution"),
 ]:
     btn = at.button(key=run_key)
@@ -94,8 +95,11 @@ check(at, "DMO")
 at.button(key="run_invnmo").click().run()
 check(at, "inverse NMO")
 
+at.button(key="run_datareg").click().run()
+check(at, "data regularisation")
+
 at.button(key="run_vel2").click().run()
-check(at, "velocity pass 2")
+check(at, "RMS velocity analysis (pass 2)")
 assert at.session_state["Vfield_2"] is not None
 
 at.button(key="run_nmofinal").click().run()

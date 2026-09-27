@@ -171,14 +171,112 @@ def depth_to_time(depth_m: np.ndarray, vp_m_s: np.ndarray,
     return twt
 
 
+def extract_statistical_wavelet(traces: np.ndarray, dt: float, length_s: float = 0.15,
+                                 t_window: Optional[Tuple[float, float]] = None) -> np.ndarray:
+    """Statistical (zero-phase) wavelet extraction directly from seismic
+    traces, for use in the well-to-seismic tie — report Sec 8.2.1.1,
+    Step 3: "extracted statistically from the seismic data ... in a
+    window around the well".
+
+    Method: the same white-reflectivity assumption underlying spiking
+    deconvolution (report Sec 6.8.2 — "the autocorrelation of the
+    seismogram approximates the autocorrelation of the wavelet") means
+    the ensemble-averaged POWER spectrum of a group of traces around the
+    well approximates the wavelet's power spectrum. Taking the square
+    root gives the wavelet's amplitude spectrum; assuming zero phase
+    (the standard default for a statistically extracted wavelet, since
+    the reflectivity assumption alone gives no phase information) and
+    inverse-transforming gives a symmetric, centered zero-phase wavelet,
+    which is then windowed to `length_s` and Hann-tapered to suppress
+    truncation artifacts.
+
+    `t_window`, if given, restricts the trace samples used to a
+    (t_min_s, t_max_s) window — typically bracketing the well/zone of
+    interest, since the wavelet's effective shape can change with time
+    (a single "the" wavelet is itself an approximation).
+    """
+    traces = np.nan_to_num(np.asarray(traces, dtype=float), nan=0.0)
+    if traces.ndim == 1:
+        traces = traces[None, :]
+    if t_window is not None:
+        i0 = max(0, int(round(t_window[0] / dt)))
+        i1 = min(traces.shape[1], int(round(t_window[1] / dt)))
+        if i1 - i0 >= 8:
+            traces = traces[:, i0:i1]
+    ns = traces.shape[1]
+    win = np.hanning(ns) if ns > 4 else np.ones(ns)
+    tapered = traces * win[None, :]
+    power = np.abs(np.fft.fft(tapered, axis=1)) ** 2
+    mean_power = power.mean(axis=0)
+    amp_spectrum = np.sqrt(mean_power)
+    wavelet_full = np.real(np.fft.ifftshift(np.fft.ifft(amp_spectrum)))
+
+    n_half = max(4, int(round(length_s / dt / 2)))
+    center = len(wavelet_full) // 2
+    lo, hi = max(0, center - n_half), min(len(wavelet_full), center + n_half + 1)
+    wav = wavelet_full[lo:hi]
+    wav = wav * np.hanning(len(wav))
+    peak = np.max(np.abs(wav))
+    if peak > 0:
+        wav = wav / peak
+    return wav
+
+
+def well_tie_correlation(synthetic: np.ndarray, seismic: np.ndarray) -> float:
+    """Zero-lag correlation coefficient between the (normalized) synthetic
+    and real seismic trace over their common length — report Sec 8.2.1.1
+    Step 4 "Matching": values above ~0.7-0.8 are generally considered a
+    good tie, though the threshold is data- and zone-dependent."""
+    n = min(len(synthetic), len(seismic))
+    s, x = synthetic[:n], seismic[:n]
+    denom = np.sqrt(np.sum(s ** 2) * np.sum(x ** 2))
+    return float(np.sum(s * x) / denom) if denom > 0 else 0.0
+
+
+def read_las_curves(file_obj) -> dict:
+    """Reads an LAS well-log file via `lasio` and returns
+    {curve_mnemonic: numpy array}, plus the depth index under key
+    "__DEPTH__". Raises ImportError with a clear message if `lasio`
+    isn't installed (it's an optional dependency, only needed for LAS
+    support — CSV well logs work without it)."""
+    try:
+        import lasio
+    except ImportError as e:
+        raise ImportError(
+            "Reading .las files needs the 'lasio' package (`pip install lasio`), "
+            "which isn't installed in this environment. CSV well logs work without it."
+        ) from e
+    las = lasio.read(file_obj)
+    curves = {mnemonic: np.asarray(las[mnemonic], dtype=float) for mnemonic in las.curves.keys()}
+    curves["__DEPTH__"] = np.asarray(las.index, dtype=float)
+    return curves
+
+
+def sonic_to_velocity(dt_log: np.ndarray, unit: str) -> np.ndarray:
+    """Converts a sonic (interval transit time) log to P-wave velocity.
+    `unit` is one of "us_per_ft" or "us_per_m" (microseconds per unit
+    length) — report Eq. 7.5, Vp = 1 / delta-t, expressed per the log's
+    native unit before converting to m/s."""
+    dt_log = np.asarray(dt_log, dtype=float)
+    safe = np.where(np.abs(dt_log) < 1e-6, np.nan, dt_log)
+    if unit == "us_per_ft":
+        vp_ft_s = 1e6 / safe
+        return vp_ft_s * 0.3048
+    elif unit == "us_per_m":
+        return 1e6 / safe
+    raise ValueError(f"Unknown sonic unit: {unit}")
+
+
+
 def synthetic_seismogram(depth_m: np.ndarray, vp_m_s: np.ndarray, rho_kg_m3: np.ndarray,
                           dt: float, wavelet_freq_hz: float = 30.0,
                           checkshot: Optional[pd.DataFrame] = None,
-                          t_max_s: float = 3.0) -> dict:
+                          t_max_s: float = 3.0, wavelet: Optional[np.ndarray] = None) -> dict:
     """Standard well-tie synthetic: acoustic impedance -> normal-incidence
     reflectivity -> resample to a uniform time axis -> convolve with a
-    Ricker wavelet (statistical wavelet extraction from the real seismic
-    is a further refinement left as a future improvement — see README).
+    wavelet. Pass `wavelet` (e.g. from `extract_statistical_wavelet`) to
+    use a wavelet extracted from the real seismic data instead of the
+    default Ricker wavelet.
 
     Returns a dict with the time axis, reflectivity-in-time, synthetic
     trace, and the depth->time curve used, for QC display.
@@ -197,13 +295,13 @@ def synthetic_seismogram(depth_m: np.ndarray, vp_m_s: np.ndarray, rho_kg_m3: np.
     t_idx = np.clip(np.round(twt / dt).astype(int), 0, len(time_axis) - 1)
     np.add.at(rc_time, t_idx, rc)
 
-    wavelet = _ricker(wavelet_freq_hz, dt)
-    synthetic = np.convolve(rc_time, wavelet, mode="same")
+    wavelet_used = wavelet if wavelet is not None else _ricker(wavelet_freq_hz, dt)
+    synthetic = np.convolve(rc_time, wavelet_used, mode="same")
 
     return {
         "time_axis": time_axis,
         "reflectivity_time": rc_time,
         "synthetic_trace": synthetic,
         "depth_time_curve": twt,
-        "wavelet": wavelet,
+        "wavelet": wavelet_used,
     }

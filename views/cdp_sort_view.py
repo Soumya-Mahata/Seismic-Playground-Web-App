@@ -33,6 +33,11 @@ def render():
     survey = st.session_state["survey"]
     shot_gathers = st.session_state["shot_gathers"]
 
+    n_in_shots = sum(g["traces"].shape[0] for g in shot_gathers.values())
+    st.caption(f"Sanity check: {n_in_shots:,} conditioned traces going in "
+                f"(survey has {survey.num_traces:,}). Sorting by CDP only re-groups these — it "
+                f"cannot change the total.")
+
     n_min = st.slider("Minimum fold to keep a CDP", 1, 40, st.session_state["n_min_traces"],
                        help="CDPs with fewer live traces than this are dropped as unreliable "
                             "edge-of-survey ensembles.")
@@ -55,8 +60,9 @@ def render():
     gathers = st.session_state["gathers"]
     cdp_list = st.session_state["cdp_list"]
     folds = np.array([g["traces"].shape[0] for g in gathers.values()])
-    st.success(f"✅ {len(cdp_list)} CDP gathers built (fold {folds.min()}-{folds.max()}) from "
-                f"pre-stack-conditioned data. Continue to **Velocity, NMO & DMO**.")
+    st.success(f"✅ {len(cdp_list)} CDP gathers built (fold {folds.min()}-{folds.max()}, "
+                f"{int(folds.sum()):,} traces total) from pre-stack-conditioned data. "
+                f"Continue to **Velocity, NMO & DMO**.")
     st.plotly_chart(seismic_plots.plot_fold_map(folds, cdp_list), theme=None, key="cdpsort_fold_map")
 
     with st.expander("Semblance preview (full velocity picking is on the next page)"):

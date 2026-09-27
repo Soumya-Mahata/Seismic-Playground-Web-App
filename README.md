@@ -269,13 +269,17 @@ seismic-playground/
   *conditioned* samples by CDP afterward, using the survey's own headers
   for grouping — nothing about the geometry changes, only which samples
   live in which gather.
-- **Click-to-pick, one mechanism, four uses.** `utils/click_picking.py`
-  wraps `st.plotly_chart(..., on_select="rerun")`'s selection event into
-  a single `consume_new_click()` helper (handles the fact that Streamlit
-  re-delivers the same selection on every unrelated rerun until the next
-  click, so a naive implementation would re-add the same point
-  repeatedly). Velocity control points, horizon picks, fault picks, and
-  the F-K reject polygon all call the same helper.
+- **Point-picking, one mechanism, four uses.** `utils/click_picking.py`
+  provides `numeric_point_form()` — a small (x, y) + "Add point" control
+  used identically for velocity control points, horizon picks, fault
+  picks, and the F-K reject polygon. Earlier versions tried
+  `st.plotly_chart(..., on_select="rerun")` for genuine click-to-pick,
+  but Streamlit does not deliver selection events for `go.Heatmap`
+  traces (only scatter/bar/histogram), which is what every one of these
+  panels is drawn on — so a click there silently never fired, and
+  turning `on_select` on also swapped the chart's drag mode from zoom to
+  box-select, breaking normal zoom/pan too. Removing `on_select`
+  restored native zoom/pan; the numeric form replaces the click.
 - **SEG-Y library:** the source notebooks use `obspy` for trace data and
   `segyio` for headers. This app uses `segyio` alone for both reading
   and writing — it covers everything needed here, and dropping `obspy`
@@ -427,23 +431,28 @@ attribute section:
    second survey, or run the optional brute-stack QC. Then **build shot
    gathers**.
 2. Work through **Pre-Stack Conditioning** tab by tab (band-pass → AGC →
-   trace edit/kill/de-spike → mute → balance → F-K filter → multiple
+   trace de-spike → trace kill → mute → balance → F-K filter → multiple
    suppression → deconvolution) — each has a "Run" button and
-   before/after QC. For the F-K filter, try "Draw my own" and click a
-   few points directly on the F-K spectrum to build a custom reject
-   polygon.
+   before/after QC. For the F-K filter, try "Build my own (numeric
+   points)" and zoom into the spectrum to read off a few (k, f)
+   coordinates to enter as a custom reject polygon.
 3. **CDP Sort & Binning** — re-group into CDP gathers, check the fold
    map, preview a semblance panel.
 4. In **Velocity, NMO & DMO**, run Pass 1, review the reliability chart,
-   **click directly on the semblance panel** to add a velocity pick (or
-   use the CVS panel as a second opinion), then continue through NMO →
-   Statics → DMO → Inverse NMO → Pass 2 → Final NMO.
-5. **Stack**, then **Post-Stack Processing**, then **Migration** —
-   adjust the display controls (colormap/clip/gain/polarity) on the
+   zoom into the semblance panel and **enter a (velocity, time) point**
+   below it to add a manual pick (or use the CVS panel as a second
+   opinion), then continue through NMO → Statics → DMO → Inverse NMO →
+   Data Regularisation → RMS Velocity Analysis (Pass 2) → Final NMO.
+5. **Stack**, then **Post-Stack Processing**, then **Migration** — pick
+   post-stack or pre-stack (PSTM) migration, and adjust the display
+   controls (colormap/clip/gain/polarity/trace-balanced display) on the
    final section.
-6. In **Interpretation**, click on the section to pick a horizon and a
-   fault; check the horizon's curvature. In **Attributes**, compute
-   sweetness or coherence and extract it along your horizon.
+6. In **Interpretation**, do the Well-to-Seismic Tie first (CSV or LAS
+   log, Ricker or statistically-extracted wavelet), then zoom into the
+   section and enter (CDP, time) points to pick a horizon and a fault;
+   check the horizon's curvature; generate a time/depth structure
+   profile. In **Attributes**, compute sweetness or coherence and
+   extract it along your horizon.
 7. Download whatever you need from **Export**.
 
 ---
@@ -488,14 +497,23 @@ python tests/test_app_flow.py
 - DMO is a simplified time-stretch approximation.
 - No field statics (no uphole/weathering-velocity data available).
 - Random noise attenuation is a spatial median filter, not F-X decon.
-- Migration is post-stack (PoSTM) Kirchhoff time migration only.
-- The well tie uses a user-chosen Ricker wavelet rather than one
-  statistically extracted from the seismic.
-- Click-to-pick relies on Streamlit's `on_select` chart-selection event
-  (confirmed against the installed Streamlit's own source/schema); it
-  hasn't been exercised in a live browser session during development —
-  if a click doesn't register as expected in your environment, the
-  editable table next to every picker is a full-precision fallback.
+- Migration offers both post-stack Kirchhoff time migration and a
+  pre-stack Kirchhoff time migration (PSTM) that sums directly from
+  offset-preserved, regularized CDP gathers; both are still 2-D time
+  migration (no depth migration, no 3-D).
+- The well tie supports both a user-chosen Ricker wavelet and a
+  statistically extracted wavelet (zero-phase, from the seismic data
+  itself).
+- Point-picking (velocity, horizon, fault, F-K polygon) is entered via a
+  small numeric (x, y) + "Add point" form under a fully zoomable/
+  pannable reference plot, rather than by clicking the plot directly:
+  Streamlit does not deliver point-selection events for `go.Heatmap`
+  traces (only scatter/bar/histogram do), so every one of these
+  Heatmap-backed panels could never have supported real click-to-pick in
+  the first place — this was confirmed, not assumed, during development
+  (see `utils/click_picking.py`'s module docstring). The editable table
+  next to every picker remains the full-precision way to review/correct
+  entries either way.
 - Geometry merging combines surveys without ID collisions but doesn't
   reconcile external SPS navigation coordinates.
 - Designed and tested against a single 2D line; 3D survey geometry is

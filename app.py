@@ -66,6 +66,13 @@ with st.sidebar:
                 text=f"{len(st.session_state['completed_stages'])}/{len(_pipeline_stages)} stages")
     if st.session_state["survey"] is not None:
         st.caption(f"📂 {st.session_state['survey'].source_name}")
+    agc_cfg = st.session_state.get("agc_config")
+    if agc_cfg:
+        st.caption(f"🔧 Active AGC: **{agc_cfg['mode'].upper()}**, window={agc_cfg['window']} samples "
+                    f"— used by every step after Amplitude Recovery.")
+    mute_cfg = st.session_state.get("mute_config")
+    if mute_cfg:
+        st.caption(f"✂️ Active mute: {mute_cfg.get('summary', '')}")
     if st.session_state["history"]:
         with st.expander("Processing history"):
             for h in st.session_state["history"]:

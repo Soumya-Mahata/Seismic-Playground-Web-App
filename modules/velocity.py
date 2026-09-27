@@ -183,7 +183,8 @@ def autopick_velocity(semblance: np.ndarray, velocities: np.ndarray, t: np.ndarr
 
 def constant_velocity_stack_panel(gathers: Dict[int, dict], cdp_list: List[int], input_key: str,
                                    center_cdp: int, half_window_cdps: int, trial_velocities: np.ndarray,
-                                   dt: float, num_samples: int) -> Tuple[np.ndarray, np.ndarray]:
+                                   dt: float, num_samples: int, offsets_key: str = "offsets"
+                                   ) -> Tuple[np.ndarray, np.ndarray]:
     """Constant Velocity Stack (CVS) analysis: for each trial (constant-
     in-time) velocity, NMO-correct a small local window of CDPs around
     `center_cdp` and stack them, producing one trace per trial velocity.
@@ -212,7 +213,7 @@ def constant_velocity_stack_panel(gathers: Dict[int, dict], cdp_list: List[int],
         all_traces, all_live = [], []
         for cdp in window_cdps:
             g = gathers[cdp]
-            nmo_out, live = nmo_correction(g[input_key], g["offsets"], vrms, dt, stretch_mute=0.5)
+            nmo_out, live = nmo_correction(g[input_key], g[offsets_key], vrms, dt, stretch_mute=0.5)
             all_traces.append(nmo_out)
             all_live.append(live)
         traces_cat = np.vstack(all_traces)
@@ -223,8 +224,8 @@ def constant_velocity_stack_panel(gathers: Dict[int, dict], cdp_list: List[int],
     return panel, power
 
 
-def max_abs_offset(gathers: Dict[int, dict], cdp: int) -> float:
-    return float(np.nanmax(np.abs(gathers[cdp]["offsets"])))
+def max_abs_offset(gathers: Dict[int, dict], cdp: int, offsets_key: str = "offsets") -> float:
+    return float(np.nanmax(np.abs(gathers[cdp][offsets_key])))
 
 
 @dataclass
@@ -247,7 +248,7 @@ def pick_velocity_field(gathers: Dict[int, dict], cdp_list: List[int], input_key
                          reliability_threshold: float = 0.15,
                          manual_overrides: Optional[Dict[int, np.ndarray]] = None,
                          excluded_cdps: Optional[set] = None,
-                         progress_cb=None
+                         progress_cb=None, offsets_key: str = "offsets"
                          ) -> Tuple[np.ndarray, List[int], Dict[int, VelocityPickResult]]:
     """Automatic multi-CDP semblance picking, laterally interpolated into a
     2-D V(t, CDP) field. Shared by both velocity-analysis passes.
@@ -276,13 +277,13 @@ def pick_velocity_field(gathers: Dict[int, dict], cdp_list: List[int], input_key
     analysis = []
     for idx in candidate_idx:
         cdp0 = cdp_list[idx]
-        if max_abs_offset(gathers, cdp0) >= min_abs_offset:
+        if max_abs_offset(gathers, cdp0, offsets_key) >= min_abs_offset:
             analysis.append(cdp0)
             continue
         found = None
         for radius in range(1, 15):
             for j in (idx - radius, idx + radius):
-                if 0 <= j < len(cdp_list) and max_abs_offset(gathers, cdp_list[j]) >= min_abs_offset:
+                if 0 <= j < len(cdp_list) and max_abs_offset(gathers, cdp_list[j], offsets_key) >= min_abs_offset:
                     found = cdp_list[j]
                     break
             if found:
@@ -305,7 +306,7 @@ def pick_velocity_field(gathers: Dict[int, dict], cdp_list: List[int], input_key
     is_manual: Dict[int, bool] = {}
     for i, cdp in enumerate(analysis):
         g = gathers[cdp]
-        S = compute_semblance_vectorized(g[input_key], g["offsets"], velocities, dt, window_len)
+        S = compute_semblance_vectorized(g[input_key], g[offsets_key], velocities, dt, window_len)
         g[f"semblance_{label}"] = S
         if cdp in manual_overrides:
             v = np.asarray(manual_overrides[cdp], dtype=float)

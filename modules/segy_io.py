@@ -314,8 +314,16 @@ def scatter_to_flat(gathers: dict, trace_key: str, num_traces: int, num_samples:
     by CDP via `build_cdp_gathers(..., data_override=...)`.
     """
     flat = np.zeros((num_traces, num_samples))
+    seen = np.zeros(num_traces, dtype=bool)
     for g in gathers.values():
-        flat[g["trace_indices"], :] = g[trace_key]
+        idx = g["trace_indices"]
+        if seen[idx].any():
+            raise ValueError(
+                "scatter_to_flat: at least one trace index appears in more than one gather — "
+                "this would silently double-count that trace. Check the grouping key used to "
+                "build these gathers.")
+        seen[idx] = True
+        flat[idx, :] = g[trace_key]
     return flat
 
 

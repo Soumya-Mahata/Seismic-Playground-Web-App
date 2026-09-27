@@ -19,7 +19,7 @@ from typing import List, Tuple
 
 import numpy as np
 from matplotlib.path import Path as MplPath
-from scipy.ndimage import median_filter
+from scipy.ndimage import gaussian_filter, median_filter
 from scipy.signal import windows
 
 import config as cfg
@@ -90,13 +90,36 @@ def dominant_frequency(data: np.ndarray, dt: float) -> float:
 # ─────────────────────────────────────────────────────────────────────────
 
 def fk_filter_gather(gather: np.ndarray, dt: float, dx: float,
-                      polygon_vertices: List[Tuple[float, float]]):
-    """2-D FFT the gather into the F-K domain, zero out everything inside
-    the reject polygon (a wedge in (k, f) space corresponding to the
-    ground-roll's characteristic low apparent velocity), and inverse-FFT
-    back to the time-offset domain.
+                      polygon_vertices: List[Tuple[float, float]], taper_sigma_px: float = 1.5):
+    """2-D FFT the gather into the F-K domain, REJECT everything *inside*
+    the drawn polygon (a wedge in (k, f) space corresponding to the
+    ground-roll's characteristic low apparent velocity — see the summer
+    report Sec 5.2.2/6.6, "ground roll ... attenuated using f-k
+    filtering"), and inverse-FFT back to the time-offset domain, passing
+    everything outside the polygon untouched.
 
-    Returns (filtered, mask, f_axis, k_axis, fk_before, fk_after) — the
+    Bug fixed here: the polygon passed into this function is documented
+    everywhere (UI copy, config name FK_POLYGON_DEFAULT) as a *reject*
+    polygon, but the mask previously applied used `contains_points(...)`
+    directly as the multiplier — i.e. it KEPT only the energy *inside*
+    the polygon (the ground-roll cone) and zeroed everything outside
+    (every real reflection). That is backwards: a "reject" polygon must
+    be inverted (kept = 1 - inside) before being used as a multiplicative
+    mask. This was silently turning the F-K "filter" into a filter that
+    kept noise and deleted signal.
+
+    The binary polygon edge is also lightly smoothed (`taper_sigma_px`,
+    in pixel/bin units of the F-K grid) with a Gaussian blur before being
+    applied, rather than used as a hard 0/1 cut — a hard rectangular
+    cutoff in the wavenumber domain rings (Gibbs phenomenon) back into
+    the time-offset domain as spurious oscillatory artifacts; a soft
+    taper at the polygon boundary is standard practice for F-K/dip
+    filtering and keeps the QC spectra honest about what is passed vs.
+    attenuated rather than a binary on/off.
+
+    Returns (filtered, pass_mask, f_axis, k_axis, fk_before, fk_after) —
+    `pass_mask` is the actual multiplier applied (1 = passed, 0 =
+    rejected, with a smooth transition at the polygon edge); the
     intermediate F-K spectra are returned for QC display.
     """
     data = np.nan_to_num(np.asarray(gather, dtype=float), nan=0.0)
@@ -105,11 +128,14 @@ def fk_filter_gather(gather: np.ndarray, dt: float, dx: float,
     k = np.fft.fftshift(np.fft.fftfreq(nx, dx))
     fk = np.fft.fftshift(np.fft.fft2(data))
     K, F = np.meshgrid(k, f, indexing="ij")
-    mask = MplPath(polygon_vertices).contains_points(
+    inside_reject_polygon = MplPath(polygon_vertices).contains_points(
         np.column_stack((K.ravel(), F.ravel()))).reshape(nx, nt).astype(float)
-    fk_filt = fk * mask
+    pass_mask = 1.0 - inside_reject_polygon
+    if taper_sigma_px and taper_sigma_px > 0:
+        pass_mask = gaussian_filter(pass_mask, sigma=taper_sigma_px, mode="nearest")
+    fk_filt = fk * pass_mask
     filtered = np.fft.ifft2(np.fft.ifftshift(fk_filt)).real
-    return filtered, mask, f, k, fk, fk_filt
+    return filtered, pass_mask, f, k, fk, fk_filt
 
 
 # ─────────────────────────────────────────────────────────────────────────

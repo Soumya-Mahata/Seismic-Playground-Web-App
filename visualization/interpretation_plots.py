@@ -18,9 +18,11 @@ from visualization import seismic_plots, theme
 
 def plot_section_with_picks(section: np.ndarray, cdp_list: Sequence[int], twt: np.ndarray, *,
                              horizons: Dict[str, Horizon] = None, faults: Dict[str, FaultLine] = None,
-                             title: str = "", pclip: float = 98.0, height: int = 600) -> go.Figure:
+                             title: str = "", pclip: float = 98.0, height: int = 600,
+                             colorscale: str = None, equalize: bool = False) -> go.Figure:
     fig = seismic_plots.plot_section(section, np.array(cdp_list), twt, title=title,
-                                      x_title="CDP", pclip=pclip, height=height)
+                                      x_title="CDP", pclip=pclip, height=height,
+                                      colorscale=colorscale, equalize=equalize)
     for name, h in (horizons or {}).items():
         interp = interpolate_horizon(h.picks, list(cdp_list))
         fig.add_trace(go.Scatter(x=list(cdp_list), y=interp, mode="lines", name=name,
@@ -37,6 +39,23 @@ def plot_section_with_picks(section: np.ndarray, cdp_list: Sequence[int], twt: n
                                   name=name, line=dict(color=fl.color, width=2.5, dash="dot"),
                                   marker=dict(symbol="x", size=8)))
     fig.update_layout(legend=theme.LEGEND, showlegend=True)
+    return fig
+
+
+def plot_structure_profile(values: np.ndarray, cdp_list: Sequence[int], *, y_title: str = "TWT (s)",
+                            title: str = "", invert_y: bool = True, color: str = "#0D2B5E") -> go.Figure:
+    """A time/depth structure "profile" along CDP — the 2D-line analogue
+    of an areal time/depth structure map (report Sec 8.5): this app only
+    ever works with a single 2D line, so there is no areal grid to
+    contour, but the same quantity (a picked/converted horizon's
+    time-or-depth value at every CDP) is shown as a continuous profile,
+    which is the correct 2D equivalent and is not a fabricated stand-in
+    for a 3D map."""
+    fig = go.Figure(go.Scatter(x=list(cdp_list), y=values, mode="lines", line=dict(color=color, width=2.5),
+                                fill="tozeroy", fillcolor="rgba(13,43,94,0.12)"))
+    fig.update_layout(**theme.base_layout(title, 420))
+    fig.update_xaxes(**theme.x_axis("CDP"))
+    fig.update_yaxes(**theme.time_axis(title=y_title, reversed_axis=invert_y))
     return fig
 
 

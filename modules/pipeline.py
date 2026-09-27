@@ -50,13 +50,18 @@ PIPELINE_STAGES: List[Stage] = [
     Stage("statics", "Residual Statics", "Surface-consistent shot/receiver statics.", "13"),
     Stage("dmo", "DMO Correction", "Simplified dip-moveout time-stretch.", "14"),
     Stage("inv_nmo", "Inverse NMO", "Undo pass-1 NMO on the DMO-corrected data.", "15"),
-    Stage("vel2", "Velocity Analysis — Pass 2", "Refined semblance velocity analysis.", "16"),
+    Stage("data_reg", "Data Regularisation", "Interpolate each CDP gather onto a common, regularly "
+          "spaced offset grid — the prerequisite for reliable velocity analysis, stacking, and "
+          "migration (report Sec 6.11).", "15b"),
+    Stage("vel2", "RMS Velocity Analysis (Pass 2)", "Refined semblance velocity analysis on "
+          "regularized data.", "16"),
     Stage("nmo_final", "Final NMO", "Apply pass-2 (refined) stacking velocities.", "17"),
     Stage("stack", "Stack", "Fold-normalized CDP stack.", "18"),
     Stage("rna", "Random Noise Attenuation", "Spatial median filter across CDPs.", "19"),
     Stage("decon_post", "Deconvolution (post-stack)", "A milder second spiking-deconvolution pass.", "20"),
     Stage("tvf", "Time-Variant Filter", "Depth-zoned band-pass blending.", "21"),
-    Stage("migration", "Kirchhoff Migration (Post-Stack Time)", "Post-stack time migration (PoSTM).", "22"),
+    Stage("migration", "Migration", "Post-stack Kirchhoff time migration, or pre-stack Kirchhoff "
+          "time migration (PSTM) on CDP gathers before stack.", "22"),
     Stage("final_scale", "Final Scaling", "Display AGC + re-applied top mute.", "23"),
 ]
 
@@ -85,6 +90,7 @@ STAGE_TRACE_KEY = {
     "statics": "traces_statics",
     "dmo": "traces_dmo",
     "inv_nmo": "traces_inv_nmo",
+    "data_reg": "traces_regularized",
     "nmo_final": "traces_nmo_final",
 }
 

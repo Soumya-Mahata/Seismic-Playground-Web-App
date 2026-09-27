@@ -40,7 +40,7 @@ The project is a Streamlit-based interactive platform for 2D land seismic proces
 - `views/`: **UI layer**. One module per application page. Contains Streamlit widgets and orchestrates calls between `modules/` and `visualization/`.
 - `utils/`: Shared helpers.
     - `session_state.py`: Manages the `st.session_state` schema and the stage-invalidation logic (re-running an early stage clears subsequent processed data).
-    - `click_picking.py`: Central mechanism for "click-to-pick" interactions (horizons, faults, velocity picks) using Plotly's `on_select` event.
+    - `click_picking.py`: `numeric_point_form()` — a small (x, y) + "Add point" form used for all point-entry (horizons, faults, velocity picks, F-K polygon). Plotly/Streamlit can't deliver click-selection events on `go.Heatmap` traces, so every one of these panels uses this form instead of a literal click.
     - `io_export.py`: Handles SEG-Y, CSV, and NumPy export operations.
 
 ### Key Technical Patterns

@@ -73,7 +73,13 @@ def render():
             col1, col2, col3 = st.columns(3)
             n_stations = col1.number_input("Receiver stations", 40, 300, 160, step=10)
             shot_interval = col2.number_input("Shot interval (stations)", 1, 10, 2)
-            channels = col3.number_input("Channels per side", 10, 90, 60, step=5)
+            channels = col3.number_input("Channels per side", 10, 90, 60, step=5,
+                                          help="This is a split-spread survey: each shot records on "
+                                               "BOTH sides of the source, so the actual channel count "
+                                               "per shot is roughly 2x this number (fewer near the "
+                                               "survey edges). That is real acquisition geometry, not "
+                                               "a duplication bug — see the trace-count check on the "
+                                               "Pre-Stack Conditioning page.")
             if st.button("Generate synthetic survey", type="primary"):
                 with st.spinner("Building synthetic survey..."):
                     new_survey = synthetic_data.generate_synthetic_survey(
