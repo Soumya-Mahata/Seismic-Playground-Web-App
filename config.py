@@ -41,12 +41,32 @@ MUTE_TTOP_DEFAULT = 0.05           # seconds
 MUTE_TAPER_DEFAULT = 0.05          # seconds
 
 # ── 9) F-K dip filter ─────────────────────────────────────────────────────
-# Polygon vertices in (k [cycles/m], f [Hz]) space — rejects the low-velocity
-# linear noise (ground roll) cone while passing steeper-velocity reflections.
-FK_POLYGON_DEFAULT = [
-    (-0.001, 5), (-0.003, 40), (-0.005, 75),
-    (0.025, 75), (0.025, 55), (0.015, 30), (0.001, 5),
-]
+# Report Sec 5.9: ground roll/direct-wave/refraction noise has a
+# characteristic LOW apparent velocity compared to primary reflections, and
+# an event of apparent velocity V traces the straight line |k| = f / V in
+# the f-k domain (report Fig. 5.64/5.67) — so rather than an arbitrary
+# hand-picked polygon, the default separation boundary here is generated
+# directly from a single, physically meaningful apparent-velocity cutoff
+# via `modules.filtering.apparent_velocity_wedge`. Events slower than this
+# cutoff (ground roll, direct wave, low-velocity refractions) fall outside
+# the resulting central wedge; primary reflections (higher apparent
+# velocity) fall inside it.
+FK_VELOCITY_CUTOFF_DEFAULT = 1800.0    # m/s
+# Chosen with a safety margin below the shallowest default reflector's
+# far-offset apparent velocity (~2077 m/s at t0=0.35s, v_nmo=1900 m/s,
+# x=1500m, via v_apparent(x) = v_nmo^2 * t(x) / x) so that reflector's
+# far-offset flank is not softened by the accept-wedge taper.
+# "Accept" (encloses the signal, i.e. the wedge above) is the report's
+# stated preference in practice ("accept polygons are preferred ... because
+# it is easier to enclose the signal zone", Sec 5.9); "reject" (encloses the
+# noise, i.e. everything outside the wedge) is the alternative, giving
+# identical results for the same boundary.
+FK_POLYGON_MODE_DEFAULT = "accept"
+# Amplitudes on the "wrong" side of the boundary are multiplied by a small
+# coefficient rather than an exact zero (report Fig. 5.66: "the reason the
+# amplitudes are not multiplied by zero is based on Fourier theory ... the
+# inverse of zero is simply infinite").
+FK_REJECT_COEFFICIENT_DEFAULT = 0.02
 
 # ── 10/15) Velocity analysis (semblance) ─────────────────────────────────
 VELOCITY_MIN_DEFAULT = 1500.0      # m/s

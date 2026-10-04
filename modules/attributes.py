@@ -179,6 +179,66 @@ ATTRIBUTE_CATEGORY = {
     "Dominant Frequency": "Frequency",
 }
 
+# Per-attribute display colorscale. The report states the Petrel display
+# convention explicitly in two places, which takes priority over reading
+# it off a photographed screen-capture (lighting/exposure in a phone photo
+# of a monitor is not a reliable color reference):
+#
+#   1) Sec. 8.6.6 "Software Workflow: Petrel", step 3 (the actual
+#      instruction, not just a figure caption): "Display the resulting
+#      attribute ... using a colour scale chosen to best highlight the
+#      anomaly of interest -- e.g. A WARM-COOL SCALE FOR RMS AMPLITUDE
+#      AND SWEETNESS, and A HIGH-CONTRAST SCALE FOR VARIANCE to sharply
+#      separate discontinuities from the background." This explicitly
+#      groups RMS Amplitude and Sweetness under the SAME scale family
+#      (sequential, cool-low/warm-high, i.e. Turbo here), and calls for a
+#      visually distinct, high-contrast treatment for Variance instead.
+#   2) Fig. 8.9/8.10/8.11 captions: RMS Amplitude "warmer colours = higher
+#      reflectivity strength"; Variance "bright/red = high discontinuity,
+#      dark = low/continuous"; Sweetness "deeper red = higher sweetness"
+#      -- all consistent with (1).
+#
+#   - RMS Amplitude, Sweetness, Instantaneous Amplitude (Envelope, the
+#     same amplitude family, explicitly "complementary to RMS amplitude"
+#     per Sec. 8.6.4): Turbo (plotly's closest built-in cool-to-warm
+#     sequential scale: blue/low -> green/yellow -> red/high).
+#   - Variance: NOT a rainbow -- a custom high-contrast scale (flat
+#     grayscale across the bulk of the range, background-indistinct by
+#     design, with a sharp break into yellow/red only in the top decile)
+#     so discontinuities "sharply separate... from the background" per
+#     the report's own wording, instead of a smooth rainbow that would
+#     paint ordinary mid-range variance green/yellow across the section.
+#   - Coherence / Similarity: the inverse-scaled counterpart of Variance
+#     (high coherence = continuous, low coherence = fault/edge). Verified
+#     against the standard industry coherence-display convention (e.g.
+#     AASPI's geometric-attributes course notes): low coherence/faults
+#     render dark/black, high coherence/continuous reflectivity renders
+#     bright -- exactly plotly's plain "Greys" (0->black, 1->white)
+#     applied directly to the 0-1 coherence value, no reversal needed.
+#   - Instantaneous Phase: a WRAPPED, cyclic quantity (-pi..pi) -- a
+#     sequential scale like Turbo would show a false "edge" at the
+#     wrap-around. Plotly's built-in cyclical "Phase" colorscale is used
+#     instead so the color wheel itself wraps smoothly; this is also the
+#     standard industry convention for instantaneous phase displays.
+#   - Instantaneous Frequency / Dominant Frequency: no explicit color
+#     convention is given in the report; kept as sequential Turbo for
+#     visual consistency with the rest of the app's frequency-type panels.
+_VARIANCE_COLORSCALE = [
+    [0.00, "#000000"], [0.55, "#4d4d4d"], [0.75, "#9e9e9e"], [0.90, "#f2f2f2"],
+    [0.94, "#ffe082"], [0.97, "#ffb300"], [1.00, "#e53935"],
+]
+
+ATTRIBUTE_COLORSCALE_MAP = {
+    "RMS Amplitude": "Turbo",
+    "Instantaneous Amplitude (Envelope)": "Turbo",
+    "Instantaneous Phase": "Phase",
+    "Instantaneous Frequency": "Turbo",
+    "Sweetness": "Turbo",
+    "Variance": _VARIANCE_COLORSCALE,
+    "Coherence / Similarity": "Greys",
+    "Dominant Frequency": "Turbo",
+}
+
 ATTRIBUTE_USE = {
     "RMS Amplitude": "Reflectivity strength; lithology/DHI mapping; channel geometry",
     "Instantaneous Amplitude (Envelope)": "Bright-spot boundaries independent of polarity",

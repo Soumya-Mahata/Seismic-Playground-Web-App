@@ -61,9 +61,9 @@ def plot_structure_profile(values: np.ndarray, cdp_list: Sequence[int], *, y_tit
 
 def plot_attribute_along_horizon(values: np.ndarray, cdp_list: Sequence[int], *,
                                   title: str = "Attribute Along Horizon", colorbar_title: str = "Value",
-                                  height: int = 320) -> go.Figure:
+                                  colorscale: str = None, height: int = 320) -> go.Figure:
     fig = go.Figure(go.Scatter(x=list(cdp_list), y=values, mode="lines+markers",
-                                marker=dict(size=5, color=values, colorscale=theme.ATTRIBUTE_COLORSCALE,
+                                marker=dict(size=5, color=values, colorscale=colorscale or theme.ATTRIBUTE_COLORSCALE,
                                             colorbar=dict(title=colorbar_title, **theme.COLORBAR)),
                                 line=dict(color="rgba(100,100,100,0.4)")))
     fig.update_layout(**theme.base_layout(title, height))

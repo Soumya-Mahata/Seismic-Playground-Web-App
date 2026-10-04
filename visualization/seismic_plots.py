@@ -22,6 +22,22 @@ import config as cfg
 from visualization import theme
 
 
+def _polygon_rings(polygon_points) -> list:
+    """Normalizes an F-K polygon overlay into a list of rings (each a
+    list of (x, y) tuples) for plotting — `polygon_points` may be a
+    single flat ring (the usual case, e.g. the accept wedge) or a list
+    of several disjoint rings (e.g. `apparent_velocity_noise_wedges`'s
+    two reject-mode flanking polygons), mirroring what
+    `modules.filtering.fk_filter_gather` itself accepts."""
+    if not polygon_points:
+        return []
+    first = polygon_points[0]
+    is_multi_ring = (isinstance(first, (list, tuple))
+                      and len(first) > 0
+                      and isinstance(first[0], (list, tuple)))
+    return [list(r) for r in polygon_points] if is_multi_ring else [list(polygon_points)]
+
+
 def plot_section(section: np.ndarray, x_values: np.ndarray, twt: np.ndarray, *,
                   title: str = "", x_title: str = "CDP", pclip: float = cfg.PCLIP_DEFAULT,
                   colorscale: str = None, height: int = 550,
@@ -199,34 +215,70 @@ def plot_wiggle_va(traces: np.ndarray, x_positions: np.ndarray, twt: np.ndarray,
 
 
 def plot_fk_spectrum(f: np.ndarray, k: np.ndarray, magnitude: np.ndarray, *,
-                      polygon_points: list | None = None, title: str = "F-K Amplitude Spectrum",
-                      height: int = 550) -> go.Figure:
+                      polygon_points: list | None = None, polygon_mode: str = "accept",
+                      title: str = "F-K Amplitude Spectrum", height: int = 550) -> go.Figure:
     """F-K amplitude spectrum display (log-scaled magnitude) with an
-    optional reject-polygon overlay — used both for passive F-K QC and
-    for manual polygon definition. The polygon marks the region that is
-    REJECTED (attenuated); everything outside it is passed."""
+    optional accept/reject polygon overlay — used both for passive F-K QC
+    and for manual polygon definition. `polygon_mode` only changes the
+    label/color (green=accept/signal, red=reject/noise); the boundary
+    itself is drawn identically either way.
+
+    Only the non-negative-frequency half (f >= 0) is displayed. A real
+    gather's F-K spectrum is Hermitian-symmetric (f<0 is a mirror image
+    of f>0, see `fk_filter_gather`'s own `inside_mirrored` handling), and
+    every reference figure for this filter (report Figs. 5.64B, 5.67)
+    plots only f=0..f_max — never the redundant negative-frequency half.
+    Showing the full -f..+f range made the accept/reject polygon (which
+    is only generated/drawn for f>=0) look like it covered just half the
+    picture instead of the whole spectrum, which was the actual source of
+    the reported "shape doesn't match the reference" mismatch; cropping
+    to f>=0 here fixes that without changing any filtering math."""
+    f_pos = f >= 0
+    f = f[f_pos]
+    magnitude = magnitude[:, f_pos]
     mag_db = 20 * np.log10(magnitude.T + 1e-6)
     mag_db -= mag_db.max()
-    fig = go.Figure(go.Heatmap(z=mag_db, x=k, y=f, colorscale="Viridis", zmin=-60, zmax=0, zsmooth="best",
+    fig = go.Figure(go.Heatmap(z=mag_db, x=k, y=f, colorscale="Turbo", zmin=-60, zmax=0, zsmooth="best",
                                 colorbar=dict(title="dB", **theme.COLORBAR)))
-    if polygon_points and len(polygon_points) >= 1:
-        pts = list(polygon_points) + ([polygon_points[0]] if len(polygon_points) >= 3 else [])
+    rings = _polygon_rings(polygon_points)
+    color = "#22c55e" if polygon_mode == "accept" else "#ef4444"
+    label = "Accept polygon (signal, kept)" if polygon_mode == "accept" else "Reject polygon (noise, attenuated)"
+    for i, ring in enumerate(rings):
+        if len(ring) < 1:
+            continue
+        pts = ring + ([ring[0]] if len(ring) >= 3 else [])
         fig.add_trace(go.Scatter(x=[p[0] for p in pts], y=[p[1] for p in pts], mode="lines+markers",
-                                  line=dict(color="#ef4444", width=2.5), marker=dict(size=8, color="#ef4444"),
-                                  fill="toself", fillcolor="rgba(239,68,68,0.15)",
-                                  name="Reject polygon (attenuated)"))
-    fig.update_layout(**theme.base_layout(title, height), showlegend=bool(polygon_points))
+                                  line=dict(color=color, width=2.5), marker=dict(size=8, color=color),
+                                  fill="toself", fillcolor=_hex_to_rgba(color, 0.15),
+                                  name=label if i == 0 else None, showlegend=(i == 0),
+                                  legendgroup="fk_polygon"))
+    fig.update_layout(**theme.base_layout(title, height), showlegend=bool(rings))
     fig.update_xaxes(**theme.x_axis("Wavenumber k (cycles/m)"))
     fig.update_yaxes(**theme.x_axis("Frequency (Hz)"))
     return fig
 
 
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    hex_color = hex_color.lstrip("#")
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def plot_fk_before_after(f: np.ndarray, k: np.ndarray, mag_before: np.ndarray, mag_after: np.ndarray, *,
-                          polygon_points: list | None = None, height: int = 500) -> go.Figure:
+                          polygon_points: list | None = None, polygon_mode: str = "accept",
+                          height: int = 500) -> go.Figure:
     """Side-by-side F-K amplitude spectra before/after applying the
-    reject-polygon mask — the direct QC for "is the filter actually
-    removing the ground-roll energy inside the polygon and leaving
-    everything else alone", which a single spectrum plot cannot show."""
+    accept/reject polygon mask — the direct QC for "is the filter
+    actually removing the ground-roll energy and leaving the signal
+    zone alone", which a single spectrum plot cannot show.
+
+    Cropped to f >= 0 for the same reason as `plot_fk_spectrum` — matches
+    the reference figures and keeps the polygon overlay (only ever
+    generated for f>=0) filling the whole visible panel."""
+    f_pos = f >= 0
+    f = f[f_pos]
+    mag_before = mag_before[:, f_pos]
+    mag_after = mag_after[:, f_pos]
     db_before = 20 * np.log10(mag_before.T + 1e-6)
     db_before -= db_before.max()
     db_after = 20 * np.log10(mag_after.T + 1e-6)
@@ -234,15 +286,17 @@ def plot_fk_before_after(f: np.ndarray, k: np.ndarray, mag_before: np.ndarray, m
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True,
                          subplot_titles=("<b>F-K spectrum — before</b>", "<b>F-K spectrum — after</b>"),
                          horizontal_spacing=0.08)
-    fig.add_trace(go.Heatmap(z=db_before, x=k, y=f, colorscale="Viridis", zmin=-60, zmax=0,
+    fig.add_trace(go.Heatmap(z=db_before, x=k, y=f, colorscale="Turbo", zmin=-60, zmax=0,
                               zsmooth="best", showscale=False), row=1, col=1)
-    fig.add_trace(go.Heatmap(z=db_after, x=k, y=f, colorscale="Viridis", zmin=-60, zmax=0, zsmooth="best",
+    fig.add_trace(go.Heatmap(z=db_after, x=k, y=f, colorscale="Turbo", zmin=-60, zmax=0, zsmooth="best",
                               colorbar=dict(title="dB", **theme.COLORBAR)), row=1, col=2)
-    if polygon_points and len(polygon_points) >= 3:
-        pts = list(polygon_points) + [polygon_points[0]]
+    rings = [r for r in _polygon_rings(polygon_points) if len(r) >= 3]
+    color = "#22c55e" if polygon_mode == "accept" else "#ef4444"
+    for ring in rings:
+        pts = ring + [ring[0]]
         for col in (1, 2):
             fig.add_trace(go.Scatter(x=[p[0] for p in pts], y=[p[1] for p in pts], mode="lines",
-                                      line=dict(color="#ef4444", width=2), showlegend=False),
+                                      line=dict(color=color, width=2), showlegend=False),
                           row=1, col=col)
     fig.update_layout(**theme.base_layout("", height))
     for c in (1, 2):
@@ -250,6 +304,21 @@ def plot_fk_before_after(f: np.ndarray, k: np.ndarray, mag_before: np.ndarray, m
     fig.update_yaxes(**theme.x_axis("Frequency (Hz)"), row=1, col=1)
     for ann in fig.layout.annotations:
         ann.font = dict(size=13, color=theme.TITLE_BLUE)
+    return fig
+
+
+def plot_fk_pass_mask(f: np.ndarray, k: np.ndarray, pass_mask: np.ndarray, *,
+                       title: str = "F-K Filter — Applied Multiplier", height: int = 480) -> go.Figure:
+    """Shows the actual real-valued multiplier applied at every (k, f)
+    bin (0..1) — the most direct possible QC for an F-K filter: rather
+    than inferring what happened from before/after spectra, this is
+    exactly what was multiplied onto the data, including the taper and
+    the small non-zero floor on the attenuated side (report Fig. 5.66)."""
+    fig = go.Figure(go.Heatmap(z=pass_mask.T, x=k, y=f, colorscale="Greys", zmin=0, zmax=1, zsmooth="best",
+                                colorbar=dict(title="Multiplier", **theme.COLORBAR)))
+    fig.update_layout(**theme.base_layout(title, height))
+    fig.update_xaxes(**theme.x_axis("Wavenumber k (cycles/m)"))
+    fig.update_yaxes(**theme.x_axis("Frequency (Hz)"))
     return fig
 
 

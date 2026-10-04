@@ -31,7 +31,11 @@ COLORBAR = dict(tickfont=dict(color=TEXT_DARK, size=11), title_font=dict(color=T
 
 SEMBLANCE_COLORSCALE = "Jet"          # standard in the geophysics community for coherence panels
 VELOCITY_COLORSCALE = "Turbo"
-ATTRIBUTE_COLORSCALE = "Viridis"
+ATTRIBUTE_COLORSCALE = "Viridis"      # generic fallback only — every attribute in the registry
+                                       # actually gets its Petrel-matched colorscale from
+                                       # modules.attributes.ATTRIBUTE_COLORSCALE_MAP instead (see
+                                       # views/attributes_view.py); this constant is never used by
+                                       # any attribute currently in the registry
 
 # ── "Seismic" colormap ──────────────────────────────────────────────────
 # Plotly has NO built-in colorscale literally named "seismic" (that name

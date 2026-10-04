@@ -73,6 +73,10 @@ with st.sidebar:
     mute_cfg = st.session_state.get("mute_config")
     if mute_cfg:
         st.caption(f"✂️ Active mute: {mute_cfg.get('summary', '')}")
+    fk_cfg = st.session_state.get("fk_config")
+    if fk_cfg:
+        st.caption(f"🌊 Active F-K filter: {fk_cfg.get('mode', '?')} polygon, {fk_cfg.get('source', '')}, "
+                    f"coeff={fk_cfg.get('coeff', 0):.3f}")
     if st.session_state["history"]:
         with st.expander("Processing history"):
             for h in st.session_state["history"]:

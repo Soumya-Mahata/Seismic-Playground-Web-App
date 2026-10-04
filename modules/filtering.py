@@ -89,50 +89,199 @@ def dominant_frequency(data: np.ndarray, dt: float) -> float:
 # 9) F-K DIP FILTER (ground-roll / coherent linear-noise attenuation)
 # ─────────────────────────────────────────────────────────────────────────
 
+def apparent_velocity_wedge(v_cutoff: float, f_max: float, k_max: float) -> List[Tuple[float, float]]:
+    """Builds the central f-k wedge bounded by the two lines |k| = f / V
+    for a single apparent-velocity cutoff `v_cutoff`, from f=0 up to
+    `f_max`, clipped to +/-`k_max` (report Sec 5.9 / Fig. 5.64: a linear-
+    moveout event of apparent velocity V traces the straight line k = f/V
+    in the f-k domain, so "reject everything slower than V" and "accept
+    everything faster than V" are both exactly this one wedge boundary —
+    the report explicitly notes both conventions give the same result).
+
+    Everything with |apparent velocity| > `v_cutoff` (primary reflections)
+    falls inside this wedge; everything slower (ground roll, direct wave,
+    low-velocity refractions, report Sec 5.2.2/5.11) falls outside it. The
+    wedge widens with frequency because the same velocity difference
+    produces a larger wavenumber separation at higher frequency — this
+    is why the report's own polygon figures (Fig. 5.67) show a shape that
+    narrows to a point at f=0 and widens toward the Nyquist frequency,
+    rather than a fixed-width band.
+
+    Only the f>=0 half needs to be given here (matching how the report's
+    own figures draw it) — `fk_filter_gather` automatically mirrors
+    whatever region it is given through the origin to cover negative
+    frequencies too, since a real signal's spectrum is symmetric there.
+    """
+    k_at_fmax = f_max / max(v_cutoff, 1e-6)
+    if k_at_fmax <= k_max:
+        return [(0.0, 0.0), (-k_at_fmax, f_max), (k_at_fmax, f_max)]
+    f_at_kmax = v_cutoff * k_max
+    return [(0.0, 0.0), (-k_max, f_at_kmax), (-k_max, f_max),
+            (k_max, f_max), (k_max, f_at_kmax)]
+
+
+def apparent_velocity_noise_wedges(v_cutoff: float, f_max: float, k_max: float
+                                     ) -> List[List[Tuple[float, float]]]:
+    """Builds the two noise-flank polygons (left and right of the signal
+    wedge) that are the *exact geometric complement*, within the f>=0
+    half of the [-k_max, k_max] x [0, f_max] rectangle, of
+    `apparent_velocity_wedge`'s signal wedge for the same `v_cutoff`.
+
+    Why this exists: per fk_filter.pdf (report Sec 5.9), "an accept
+    polygon encloses the signal amplitudes ... a reject polygon
+    surrounds the noise area ... [and] both approaches normally produce
+    the same results" — but that equivalence only holds if the reject
+    polygon actually traces the NOISE region's own boundary. Reusing the
+    signal wedge's shape as a "reject" polygon would tell the masking
+    logic in `fk_filter_gather` that the signal fan itself is the noise
+    to be attenuated (and the ground roll outside it is the signal to be
+    kept) — exactly backward. This function gives the reject path its
+    own, correctly-shaped polygon so accept and reject produce the same
+    (correct) filtered result, as the report says they should, instead
+    of opposite ones.
+
+    The complement of a single wedge inside a rectangle is two disjoint
+    pieces (left and right of the wedge), not one simple polygon, so this
+    returns a list of two rings rather than one vertex list.
+    `fk_filter_gather` accepts a list of rings for exactly this case,
+    testing membership in their union.
+    """
+    k_at_fmax = f_max / max(v_cutoff, 1e-6)
+    if k_at_fmax <= k_max:
+        left = [(-k_max, 0.0), (-k_max, f_max), (-k_at_fmax, f_max), (0.0, 0.0)]
+        right = [(0.0, 0.0), (k_at_fmax, f_max), (k_max, f_max), (k_max, 0.0)]
+    else:
+        # The signal wedge already saturates to the full k-width at
+        # f_at_kmax < f_max, so above that frequency there is no noise
+        # flank left at all — each flank is just the triangle below it.
+        f_at_kmax = v_cutoff * k_max
+        left = [(-k_max, 0.0), (-k_max, f_at_kmax), (0.0, 0.0)]
+        right = [(0.0, 0.0), (k_max, f_at_kmax), (k_max, 0.0)]
+    return [left, right]
+
+
+def default_fk_polygon(dt: float, dx: float, v_cutoff: float = cfg.FK_VELOCITY_CUTOFF_DEFAULT
+                        ) -> List[Tuple[float, float]]:
+    """Convenience wrapper: builds the apparent-velocity wedge spanning
+    this gather's actual Nyquist frequency and Nyquist wavenumber, so
+    callers don't need to compute the F-K axes themselves first."""
+    return apparent_velocity_wedge(v_cutoff, f_max=0.5 / dt, k_max=0.5 / dx)
+
+
 def fk_filter_gather(gather: np.ndarray, dt: float, dx: float,
-                      polygon_vertices: List[Tuple[float, float]], taper_sigma_px: float = 1.5):
-    """2-D FFT the gather into the F-K domain, REJECT everything *inside*
-    the drawn polygon (a wedge in (k, f) space corresponding to the
-    ground-roll's characteristic low apparent velocity — see the summer
-    report Sec 5.2.2/6.6, "ground roll ... attenuated using f-k
-    filtering"), and inverse-FFT back to the time-offset domain, passing
-    everything outside the polygon untouched.
+                      polygon_vertices: List[Tuple[float, float]], *,
+                      polygon_mode: str = cfg.FK_POLYGON_MODE_DEFAULT,
+                      reject_coefficient: float = cfg.FK_REJECT_COEFFICIENT_DEFAULT,
+                      taper_sigma_px: float = 1.5):
+    """2-D FFT the gather into the F-K domain and apply an accept or
+    reject polygon (report Sec 5.9, Fig. 5.66/5.67):
 
-    Bug fixed here: the polygon passed into this function is documented
-    everywhere (UI copy, config name FK_POLYGON_DEFAULT) as a *reject*
-    polygon, but the mask previously applied used `contains_points(...)`
-    directly as the multiplier — i.e. it KEPT only the energy *inside*
-    the polygon (the ground-roll cone) and zeroed everything outside
-    (every real reflection). That is backwards: a "reject" polygon must
-    be inverted (kept = 1 - inside) before being used as a multiplicative
-    mask. This was silently turning the F-K "filter" into a filter that
-    kept noise and deleted signal.
+    - **accept** (`polygon_mode="accept"`, the report's stated preference
+      "in practice ... because it is easier to enclose the signal zone"):
+      `polygon_vertices` must enclose the SIGNAL; amplitudes OUTSIDE it
+      are attenuated.
+    - **reject** (`polygon_mode="reject"`): `polygon_vertices` must
+      enclose the NOISE instead; amplitudes INSIDE it are attenuated.
+      "Although both approaches normally produce the same results ...
+      accept polygons are preferred in practice."
 
-    The binary polygon edge is also lightly smoothed (`taper_sigma_px`,
-    in pixel/bin units of the F-K grid) with a Gaussian blur before being
-    applied, rather than used as a hard 0/1 cut — a hard rectangular
-    cutoff in the wavenumber domain rings (Gibbs phenomenon) back into
-    the time-offset domain as spurious oscillatory artifacts; a soft
-    taper at the polygon boundary is standard practice for F-K/dip
-    filtering and keeps the QC spectra honest about what is passed vs.
-    attenuated rather than a binary on/off.
+    **Critical**: accept and reject are not two ways of describing the
+    same boundary — they require DIFFERENT polygons (the signal region
+    and its geometric complement, the noise region) to produce the
+    report's claimed equivalent result. Passing the signal-enclosing
+    wedge with `polygon_mode="reject"` does not "flip" a label — it
+    tells this function the signal fan IS the noise, and attenuates it
+    while passing the ground roll through untouched. Callers that offer
+    both modes for the same underlying apparent-velocity cutoff must
+    build the complementary polygon for reject (see
+    `apparent_velocity_noise_wedges`), not reuse `apparent_velocity_wedge`
+    with the mode flag flipped.
+
+    Either way, the attenuated side is multiplied by `reject_coefficient`
+    — a small nonzero constant, **not an exact zero** — per Fig. 5.66's
+    explicit note: multiplying by a constant in the frequency domain is
+    equivalent to scaling by the inverse of that constant in the time
+    domain, and "the inverse of zero is simply infinite." The polygon
+    boundary is also lightly Gaussian-tapered (`taper_sigma_px`, in
+    pixel/bin units of the F-K grid) rather than used as a hard 0/1 cut,
+    since a hard rectangular cutoff in wavenumber rings (Gibbs
+    phenomenon) back into the time-offset domain as spurious oscillatory
+    artifacts.
+
+    Only the amplitude spectrum is touched — the complex F-K spectrum is
+    scaled by a real-valued mask, so phase is left unchanged, exactly as
+    Fig. 5.66 specifies ("Leave the phase spectrum unchanged").
 
     Returns (filtered, pass_mask, f_axis, k_axis, fk_before, fk_after) —
-    `pass_mask` is the actual multiplier applied (1 = passed, 0 =
-    rejected, with a smooth transition at the polygon edge); the
-    intermediate F-K spectra are returned for QC display.
+    `pass_mask` is the actual real-valued multiplier applied at every
+    (k, f) bin, so it can be displayed directly as QC; the intermediate
+    F-K spectra are returned for before/after spectrum QC.
     """
+    if polygon_mode not in ("accept", "reject"):
+        raise ValueError(f"polygon_mode must be 'accept' or 'reject', got {polygon_mode!r}")
     data = np.nan_to_num(np.asarray(gather, dtype=float), nan=0.0)
     nx, nt = data.shape
     f = np.fft.fftshift(np.fft.fftfreq(nt, dt))
     k = np.fft.fftshift(np.fft.fftfreq(nx, dx))
     fk = np.fft.fftshift(np.fft.fft2(data))
     K, F = np.meshgrid(k, f, indexing="ij")
-    inside_reject_polygon = MplPath(polygon_vertices).contains_points(
-        np.column_stack((K.ravel(), F.ravel()))).reshape(nx, nt).astype(float)
-    pass_mask = 1.0 - inside_reject_polygon
+    pts = np.column_stack((K.ravel(), F.ravel()))
+    # `polygon_vertices` is normally one ring: a flat list of (x, y)
+    # points. It can also be a list of several disjoint rings (e.g.
+    # `apparent_velocity_noise_wedges`'s two flanking polygons) when the
+    # region of interest isn't a single simple polygon — detected by
+    # whether the first element is itself a point or a whole ring.
+    is_multi_ring = (len(polygon_vertices) > 0
+                      and isinstance(polygon_vertices[0], (list, tuple))
+                      and len(polygon_vertices[0]) > 0
+                      and isinstance(polygon_vertices[0][0], (list, tuple, np.ndarray)))
+    if is_multi_ring:
+        path = MplPath.make_compound_path(*[MplPath(ring) for ring in polygon_vertices])
+    else:
+        path = MplPath(polygon_vertices)
+    # A real-valued signal's 2-D spectrum is Hermitian-symmetric:
+    # X(-k,-f) = conj(X(k,f)). The report's own polygon figures (Fig. 5.67)
+    # only ever show/label a polygon drawn in the positive-frequency half
+    # of the spectrum — exactly as any geophysicist would draw one — but
+    # this app's f-k grid (from fftshift) spans BOTH positive and negative
+    # frequencies. A polygon defined only for f>0 previously left every
+    # negative-frequency bin outside it, which an "accept" mask then
+    # floored to `reject_coefficient` — silently discarding half of a
+    # real signal's necessary spectral content (verified: this cut a pure
+    # flat reflector's amplitude by ~50%, not the "leave the signal
+    # alone" an accept wedge is supposed to do). The fix: automatically
+    # OR the requested region with its own point-reflection through the
+    # origin, so a polygon drawn (or generated) only in positive-f space
+    # is honored correctly on both halves without requiring the caller to
+    # draw a mirrored polygon by hand.
+    inside_direct = path.contains_points(pts).reshape(nx, nt)
+    inside_mirrored = path.contains_points(-pts).reshape(nx, nt)
+    inside = (inside_direct | inside_mirrored).astype(float)
     if taper_sigma_px and taper_sigma_px > 0:
-        pass_mask = gaussian_filter(pass_mask, sigma=taper_sigma_px, mode="nearest")
+        # Taper ONLY along the wavenumber axis (axis 0), never along
+        # frequency (axis 1). An isotropic 2-D blur was used here
+        # originally, but the wedge's own apex sits exactly at (k=0,
+        # f=0) by construction (Fig. 5.64/5.67: the boundary narrows to
+        # a point at f=0) — smoothing across BOTH axes rounds off that
+        # point, which disproportionately attenuates genuine low-
+        # frequency, near-zero-dip reflection energy that legitimately
+        # belongs at k=0 for f just above 0 (verified: a purely flat,
+        # k=0 reflector lost ~45% of its energy to this, concentrated
+        # exactly in the 0-5 Hz tail of its wavelet, even though a flat
+        # reflector is in no sense noise). A real f-k filter's taper
+        # exists to stop a hard wavenumber cutoff from ringing
+        # (Gibbs phenomenon) in the along-trace (space) direction — it
+        # was never meant to soften anything in the frequency direction,
+        # so restricting it to axis 0 removes the artifact while still
+        # doing its actual job.
+        inside = gaussian_filter(inside, sigma=(taper_sigma_px, 0), mode="nearest")
+    coeff = float(np.clip(reject_coefficient, 0.0, 1.0))
+    if polygon_mode == "accept":
+        # kept (~1) inside the polygon, floor of `coeff` outside it
+        pass_mask = coeff + (1.0 - coeff) * inside
+    else:
+        # kept (~1) outside the polygon, floor of `coeff` inside it
+        pass_mask = coeff + (1.0 - coeff) * (1.0 - inside)
     fk_filt = fk * pass_mask
     filtered = np.fft.ifft2(np.fft.ifftshift(fk_filt)).real
     return filtered, pass_mask, f, k, fk, fk_filt

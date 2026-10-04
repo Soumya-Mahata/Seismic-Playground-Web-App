@@ -119,10 +119,26 @@ def trace_energy(data: np.ndarray) -> np.ndarray:
 def flag_bad_traces(data: np.ndarray, dead_frac: float = 0.02, noisy_mult: float = 8.0) -> dict:
     """Flags dead (near-zero energy) and abnormally noisy (energy far
     above the ensemble median) traces within a gather — the "trace edit
-    / kill" step of a standard noise-attenuation sequence. Returns a
-    dict of boolean masks and the underlying energy values so a QC view
-    can show exactly why each trace was flagged, rather than silently
-    dropping traces."""
+    / kill" step of a standard noise-attenuation sequence.
+
+    IMPORTANT — call this on gain-recovery data that still preserves
+    relative amplitude BETWEEN traces (e.g. the band-passed data,
+    `traces_bp`), never on AGC output (`traces_agc`). AGC is a per-trace
+    self-normalizing gain: it divides each trace by a sliding estimate
+    of its OWN local energy, so after AGC every trace — dead, noisy, or
+    perfectly healthy — ends up at very nearly the same RMS level by
+    construction. Confirmed empirically: a channel that is 1000x weaker
+    than its neighbors before AGC becomes indistinguishable from them
+    afterward, so this function would silently flag nothing. This is
+    exactly the report's own warning in Sec 5.6.3 that AGC "completely
+    removes relative amplitude information embedded in the seismic
+    data" — that applies just as much to a QC step that depends on
+    relative amplitude as it does to AVO/inversion.
+
+    Returns a dict of boolean masks and the underlying energy values so
+    a QC view can show exactly why each trace was flagged, rather than
+    silently dropping traces.
+    """
     energy = trace_energy(data)
     median_energy = np.median(energy[energy > 0]) if np.any(energy > 0) else 0.0
     dead = energy < dead_frac * (median_energy + 1e-12)
@@ -311,6 +327,39 @@ def apply_linear_mute(data: np.ndarray, offsets: np.ndarray, dt: float, velocity
             mask[lo:hi] = 0.5 * (1 - np.cos(np.linspace(0, np.pi, hi - lo)))
         out[i, :] = data[i, :] * mask
     return out, mute_times
+
+
+def apply_surgical_mute(data: np.ndarray, offsets: np.ndarray, dt: float, *,
+                         t_min: float, t_max: float, x_min: float, x_max: float,
+                         taper_s: float = 0.02) -> np.ndarray:
+    """Surgical mute (report Sec 5.8, Fig 5.57B/5.60): zeroes a specific
+    rectangular (offset, time) region of noise *inside* the gather —
+    unlike a top mute, this does not need to start from t=0, and unlike
+    trace kill it does not need to remove a whole trace. The report's
+    own example (Fig 5.60) is exactly this: "distinctive high-frequency
+    harmonic noise in a triangular zone along the near offset channels"
+    that "is not easy to remove ... using conventional processing
+    methodology", handled with a surgical mute rather than a filter.
+
+    Traces with |offset| in [x_min, x_max] are zeroed for time in
+    [t_min, t_max], with a cosine taper of `taper_s` seconds on both the
+    time and offset edges of the box so the cut doesn't ring.
+    """
+    n_tr, ns = data.shape
+    time = np.arange(ns) * dt
+    it_tap = max(1, int(round(taper_s / dt)))
+    it0, it1 = int(round(t_min / dt)), int(round(t_max / dt))
+    out = data.copy()
+    in_offset = (np.abs(offsets) >= x_min) & (np.abs(offsets) <= x_max)
+    time_mask = np.ones(ns)
+    lo, hi = max(0, it0 - it_tap), min(ns, it1 + it_tap)
+    time_mask[it0:it1] = 0.0
+    if it0 - lo > 0:
+        time_mask[lo:it0] = np.cos(np.linspace(0, np.pi / 2, it0 - lo)) ** 2
+    if hi - it1 > 0:
+        time_mask[it1:hi] = np.cos(np.linspace(np.pi / 2, 0, hi - it1)) ** 2
+    out[in_offset, :] *= time_mask[None, :]
+    return out, in_offset
 
 
 def mute_mask(ns: int, dt: float, t_top: float = 0.05, t_bottom: float | None = None,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import streamlit as st
 
-from modules.attributes import ATTRIBUTE_REGISTRY
+from modules.attributes import ATTRIBUTE_REGISTRY, ATTRIBUTE_COLORSCALE_MAP
 from modules.interpretation import extract_attribute_along_horizon, interpolate_horizon
 from utils import session_state as ss
 from visualization import interpretation_plots, seismic_plots, theme
@@ -45,8 +45,9 @@ def render():
 
     if attr_name in st.session_state["attributes"]:
         values = st.session_state["attributes"][attr_name]
+        attr_colorscale = ATTRIBUTE_COLORSCALE_MAP.get(attr_name, theme.ATTRIBUTE_COLORSCALE)
         st.plotly_chart(seismic_plots.plot_amplitude_time_map(
-            values, cdp_list, twt, title=attr_name, colorscale=theme.ATTRIBUTE_COLORSCALE,
+            values, cdp_list, twt, title=attr_name, colorscale=attr_colorscale,
             colorbar_title=attr_name, height=550), theme=None, key="attributes_view_chart_1001")
 
         horizons = st.session_state["horizons"]
@@ -63,4 +64,5 @@ def render():
                 vals = extract_attribute_along_horizon(values, cdp_list, horizon_time, dt,
                                                          half_window_s=half_window_ms / 1000.0)
                 st.plotly_chart(interpretation_plots.plot_attribute_along_horizon(
-                    vals, cdp_list, title=f"{attr_name} along '{hname}'", colorbar_title=attr_name), theme=None, key="attributes_view_chart_1")
+                    vals, cdp_list, title=f"{attr_name} along '{hname}'", colorbar_title=attr_name,
+                    colorscale=attr_colorscale), theme=None, key="attributes_view_chart_1")

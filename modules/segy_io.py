@@ -68,6 +68,11 @@ class SeismicSurvey:
     binary_header: dict
     is_synthetic: bool = False
     notes: str = ""
+    # Ground-truth metadata for injected field-noise conditions on synthetic
+    # data (empty for real uploaded data) — lets the app point the person
+    # directly at a shot/trace with a genuine problem to fix, rather than an
+    # arbitrary "example shot" that may have nothing wrong with it at all.
+    field_noise_info: dict = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────

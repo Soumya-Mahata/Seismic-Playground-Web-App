@@ -47,9 +47,10 @@ for g in shot_gathers.values():
 print("[6] Trace balancing done")
 
 # 6) F-K filter (shot domain)
+fk_polygon = filtering.default_fk_polygon(dt, survey.group_interval)
 for g in shot_gathers.values():
     filt, _, _, _, _, _ = filtering.fk_filter_gather(g["traces_balanced"], dt, survey.group_interval,
-                                                       cfg.FK_POLYGON_DEFAULT)
+                                                       fk_polygon)
     g["traces_fk_filtered"] = filt
 print("[7] F-K filter done")
 

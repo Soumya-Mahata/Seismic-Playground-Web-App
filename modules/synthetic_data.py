@@ -99,6 +99,65 @@ def _survey_geometry(n_stations: int, dx: float, shot_interval_stations: int,
     return xs_arr, xr_arr, offsets, shot_id, receiver_station, cdp_number
 
 
+def _inject_field_noise(raw_data: np.ndarray, receiver_station: np.ndarray, shot_id: np.ndarray,
+                         dt: float, rng: np.random.Generator, *,
+                         dead_stations: set, powerline_stations: set, powerline_freq: float,
+                         n_spikes: int, spike_amplitude_mult: float) -> dict:
+    """Injects the realistic field-noise conditions the report's Trace
+    Edit / De-spike / Mute sections are actually written around (Sec 5.7,
+    Figs 5.50-5.56) directly into `raw_data` in place, and returns the
+    ground truth (which stations/traces were corrupted) for QC.
+
+    Without conditions like these, a clean synthetic gather gives the
+    Trace Edit / De-spike step nothing to actually fix — running it does
+    nothing, which is indistinguishable from it being broken. Each
+    condition here mirrors one the report documents explicitly:
+    - **Dead channels** (Fig 5.51): "the channel numbers of dead traces
+      do not change for a specific survey" — so these are fixed receiver
+      stations, dead on every shot that records them, not random
+      per-trace dropouts.
+    - **Powerline harmonic noise** (Fig 5.50): a monofrequency (here 50
+      Hz) sinusoid on a contiguous run of channels — the report notes
+      trace kill is preferred over a notch filter here since a notch
+      "produces amplitude notches in the spectrum which may ultimately
+      cause issues during deconvolution."
+    - **Spike-like noise bursts** (Fig 5.52): isolated, extremely high-
+      amplitude single-sample transients scattered through the dataset.
+    """
+    twt = np.arange(raw_data.shape[1]) * dt
+    info: dict = {"dead_stations": sorted(dead_stations), "powerline_stations": sorted(powerline_stations),
+                  "powerline_freq_hz": powerline_freq, "spike_locations": []}
+
+    if dead_stations:
+        dead_mask = np.isin(receiver_station, list(dead_stations))
+        # A real dead channel isn't analytically exact zero, just a tiny
+        # instrument noise floor with no coherent signal in it at all.
+        raw_data[dead_mask, :] = rng.normal(scale=1e-4, size=(int(dead_mask.sum()), raw_data.shape[1]))
+
+    if powerline_stations:
+        pl_mask = np.isin(receiver_station, list(powerline_stations))
+        n_pl = int(pl_mask.sum())
+        if n_pl:
+            phase = rng.uniform(0, 2 * np.pi, size=n_pl)
+            pl_signal = 2.5 * np.sin(2 * np.pi * powerline_freq * twt[None, :] + phase[:, None])
+            # a touch of the 2nd harmonic too, matching "harmonic noise"
+            pl_signal += 1.0 * np.sin(2 * np.pi * (2 * powerline_freq) * twt[None, :] + phase[:, None])
+            raw_data[pl_mask, :] += pl_signal
+
+    if n_spikes > 0:
+        n_tr, n_s = raw_data.shape
+        base_amp = float(np.std(raw_data)) + 1e-9
+        tr_idx = rng.integers(0, n_tr, size=n_spikes)
+        samp_idx = rng.integers(int(0.05 / dt), n_s, size=n_spikes)
+        for ti, si in zip(tr_idx, samp_idx):
+            burst = float(rng.choice([-1.0, 1.0]) * base_amp * rng.uniform(8.0, 15.0))
+            raw_data[ti, si] += burst
+            info["spike_locations"].append({"trace_index": int(ti), "sample_index": int(si),
+                                              "shot_id": int(shot_id[ti]),
+                                              "receiver_station": int(receiver_station[ti])})
+    return info
+
+
 def generate_synthetic_survey(
     n_stations: int = 160,
     dx: float = 25.0,
@@ -116,8 +175,24 @@ def generate_synthetic_survey(
     noise_std: float = 0.03,
     seed: int = RNG_SEED_DEFAULT,
     source_name: str = "synthetic_survey.sgy",
+    inject_field_noise: bool = False,
+    n_dead_channels: int = 2,
+    n_powerline_channels: int = 4,
+    powerline_freq_hz: float = 50.0,
+    n_spikes: int = 20,
 ) -> SeismicSurvey:
-    """Generate a complete synthetic 2D land seismic survey in memory."""
+    """Generate a complete synthetic 2D land seismic survey in memory.
+
+    `inject_field_noise=True` adds a small, fixed set of dead channels,
+    a contiguous powerline-noise-affected channel range, and scattered
+    high-amplitude spikes (report Sec 5.7) — see `_inject_field_noise` —
+    so the Trace Edit / De-spike / Mute steps have real, documented
+    problems to find and fix rather than a perfectly clean gather.
+    Defaults to False (a clean survey) so velocity-analysis and other
+    accuracy tests that call this function directly aren't perturbed by
+    noise they aren't testing for; the app's own "Generate synthetic
+    survey" button explicitly opts in.
+    """
     reflectors = reflectors if reflectors is not None else DEFAULT_REFLECTORS
     diffractor = diffractor if diffractor is not None else DEFAULT_DIFFRACTOR
     rng = np.random.default_rng(seed)
@@ -181,6 +256,22 @@ def generate_synthetic_survey(
 
     raw_data = primary + ground_roll + noise
 
+    field_noise_info: dict = {}
+    if inject_field_noise:
+        all_stations = np.unique(receiver_station)
+        dead = set()
+        if n_dead_channels > 0 and len(all_stations) > n_dead_channels:
+            start = int(len(all_stations) * 0.33)
+            dead = set(int(s) for s in all_stations[start:start + n_dead_channels])
+        powerline = set()
+        if n_powerline_channels > 0 and len(all_stations) > n_powerline_channels:
+            start = int(len(all_stations) * 0.66)
+            powerline = set(int(s) for s in all_stations[start:start + n_powerline_channels])
+        field_noise_info = _inject_field_noise(
+            raw_data, receiver_station, shot_id, dt, rng,
+            dead_stations=dead, powerline_stations=powerline, powerline_freq=powerline_freq_hz,
+            n_spikes=n_spikes, spike_amplitude_mult=1.0)
+
     group_interval = float(dx)
     survey = SeismicSurvey(
         source_name=source_name,
@@ -203,12 +294,17 @@ def generate_synthetic_survey(
         text_header_lines=["SYNTHETIC SEISMIC TEST DATA - FOR SOFTWARE TESTING ONLY"],
         binary_header={},
         is_synthetic=True,
+        field_noise_info=field_noise_info,
         notes=(
             f"Synthetic 2D line: {n_stations} stations @ {dx} m, "
             f"{len(np.unique(shot_id))} shots, {n_traces} traces. "
             f"Ground truth reflectors (t0 s / v m/s): "
             + ", ".join(f"{r.t0:.2f}/{r.velocity:.0f}" for r in reflectors)
             + f". Point diffractor at t0={diffractor['t0']:.2f}s, v={diffractor['velocity']:.0f} m/s."
+            + (f" Injected field noise: dead stations {field_noise_info.get('dead_stations')}, "
+               f"powerline-noise stations {field_noise_info.get('powerline_stations')}, "
+               f"{len(field_noise_info.get('spike_locations', []))} spike bursts."
+               if field_noise_info else "")
         ),
     )
     return survey
@@ -229,4 +325,5 @@ def save_synthetic_segy(path: str, **kwargs) -> SeismicSurvey:
     reloaded = read_segy(path, source_name=kwargs.get("source_name", "synthetic_survey.sgy"))
     reloaded.is_synthetic = True
     reloaded.notes = survey.notes
+    reloaded.field_noise_info = survey.field_noise_info
     return reloaded
