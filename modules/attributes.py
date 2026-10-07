@@ -179,10 +179,19 @@ ATTRIBUTE_CATEGORY = {
     "Dominant Frequency": "Frequency",
 }
 
-# Per-attribute display colorscale. The report states the Petrel display
-# convention explicitly in two places, which takes priority over reading
-# it off a photographed screen-capture (lighting/exposure in a phone photo
-# of a monitor is not a reliable color reference):
+# Per-attribute display colorscale, cross-checked against three sources:
+# (1) the report's own explicit color instructions, (2) Petrel/AASPI
+# industry display convention for each attribute *family* (cyclic vs.
+# single-polarity-gradational vs. dual-polarity-diverging vs.
+# discontinuity/monochrome), and (3) direct visual evidence from the
+# attached "Line A" reference figures (Instantaneous Attributes 4-panel,
+# Energy & Structural Attributes 2-panel, Spectral Decomposition, Dominant
+# Frequency). Where the report gives an explicit written instruction, that
+# takes priority over reading color off a photographed screen-capture
+# (lighting/exposure in a phone photo of a monitor is not a reliable color
+# reference) -- but a consistent instantaneous-attribute convention
+# shared by Petrel, AASPI, and the matplotlib reference figures is treated
+# as authoritative where the report itself is silent.
 #
 #   1) Sec. 8.6.6 "Software Workflow: Petrel", step 3 (the actual
 #      instruction, not just a figure caption): "Display the resulting
@@ -197,11 +206,37 @@ ATTRIBUTE_CATEGORY = {
 #      reflectivity strength"; Variance "bright/red = high discontinuity,
 #      dark = low/continuous"; Sweetness "deeper red = higher sweetness"
 #      -- all consistent with (1).
+#   3) AASPI's "Color and multiattribute display" course notes (industry/
+#      academic standard, independent of this specific report): cyclic
+#      attributes (phase, azimuth, dip direction) get a cyclic hue-based
+#      colorbar so the wrap-around shows no false edge; discontinuity
+#      attributes (variance, coherence) get a monochrome/grayscale ramp;
+#      single-polarity attributes (envelope, coherence magnitude) get a
+#      single-gradational scale with a neutral/dark background for low
+#      values; dual-polarity attributes (signed amplitude, curvature) get
+#      a diverging scale with a neutral center.
+#   4) The attached "Line A" reference images (a different, Python/
+#      matplotlib-generated attribute set, independent of the Petrel
+#      screen-captures) directly show: Envelope as black -> red -> orange
+#      -> yellow -> white (a "hot" family scale, not a rainbow);
+#      Instantaneous Phase as a vivid full-hue color wheel (cyclic,
+#      HSV-style, matching (3)'s cyclic-phase convention); Instantaneous
+#      Frequency as a dark-purple -> blue -> orange -> yellow ramp (a
+#      "plasma" family scale, distinct from both Turbo and the
+#      amplitude-family warm-cool scale).
 #
-#   - RMS Amplitude, Sweetness, Instantaneous Amplitude (Envelope, the
-#     same amplitude family, explicitly "complementary to RMS amplitude"
-#     per Sec. 8.6.4): Turbo (plotly's closest built-in cool-to-warm
-#     sequential scale: blue/low -> green/yellow -> red/high).
+#   - RMS Amplitude, Sweetness (same amplitude family, Sweetness
+#     explicitly "complementary to RMS amplitude" per Sec. 8.6.4): Turbo
+#     (plotly's closest built-in cool-to-warm sequential scale: blue/low
+#     -> green/yellow -> red/high), per the report's explicit instruction.
+#   - Instantaneous Amplitude (Envelope): NOT grouped with RMS Amplitude
+#     here, despite being the same physical quantity family -- the report
+#     only names "RMS amplitude" in its warm-cool instruction, and the
+#     reference image shows Envelope with a single-polarity, neutral-at-
+#     zero "hot" scale (black/background at low envelope, through red/
+#     orange to white/saturated at high envelope), matching AASPI's
+#     single-polarity convention (3) as well as the reference image (4).
+#     Uses plotly's built-in "Hot".
 #   - Variance: NOT a rainbow -- a custom high-contrast scale (flat
 #     grayscale across the bulk of the range, background-indistinct by
 #     design, with a sharp break into yellow/red only in the top decile)
@@ -217,11 +252,18 @@ ATTRIBUTE_CATEGORY = {
 #     applied directly to the 0-1 coherence value, no reversal needed.
 #   - Instantaneous Phase: a WRAPPED, cyclic quantity (-pi..pi) -- a
 #     sequential scale like Turbo would show a false "edge" at the
-#     wrap-around. Plotly's built-in cyclical "Phase" colorscale is used
-#     instead so the color wheel itself wraps smoothly; this is also the
-#     standard industry convention for instantaneous phase displays.
-#   - Instantaneous Frequency / Dominant Frequency: no explicit color
-#     convention is given in the report; kept as sequential Turbo for
+#     wrap-around. The reference image shows this as a vivid, fully
+#     saturated color wheel rather than the softer pastel sweep of
+#     plotly's "Phase" scale, so this is now plotly's built-in cyclical
+#     "HSV" -- closer to the reference figure and to Petrel's own default
+#     phase wheel, while still wrapping smoothly like "Phase" did.
+#   - Instantaneous Frequency: the reference image shows a distinct dark-
+#     purple-to-yellow ramp (not the amplitude family's warm-cool Turbo),
+#     consistent with treating frequency as its own attribute family per
+#     AASPI (3) -- now plotly's built-in sequential "Plasma".
+#   - Dominant Frequency: kept as Turbo -- the report groups it visually
+#     with the other Turbo-family frequency/amplitude panels elsewhere in
+#     the app and no reference image contradicts this; left unchanged for
 #     visual consistency with the rest of the app's frequency-type panels.
 _VARIANCE_COLORSCALE = [
     [0.00, "#000000"], [0.55, "#4d4d4d"], [0.75, "#9e9e9e"], [0.90, "#f2f2f2"],
@@ -230,9 +272,9 @@ _VARIANCE_COLORSCALE = [
 
 ATTRIBUTE_COLORSCALE_MAP = {
     "RMS Amplitude": "Turbo",
-    "Instantaneous Amplitude (Envelope)": "Turbo",
-    "Instantaneous Phase": "Phase",
-    "Instantaneous Frequency": "Turbo",
+    "Instantaneous Amplitude (Envelope)": "Hot",
+    "Instantaneous Phase": "HSV",
+    "Instantaneous Frequency": "Plasma",
     "Sweetness": "Turbo",
     "Variance": _VARIANCE_COLORSCALE,
     "Coherence / Similarity": "Greys",

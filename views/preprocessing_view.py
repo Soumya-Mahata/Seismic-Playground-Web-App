@@ -92,7 +92,7 @@ def render():
                         "every trace. This is worth checking against the survey's FieldRecord header.")
 
     tabs = st.tabs(["1. Band-Pass Filter", "2. Amplitude Recovery", "3. Trace Edit/Kill/De-spike",
-                    "4. Top Mute", "5. Trace Balancing", "6. F-K Filter", "7. Multiple Suppression",
+                    "4. Mute", "5. Trace Balancing", "6. F-K Filter", "7. Multiple Suppression",
                     "8. Deconvolution"])
 
     # ---- 1) Band-pass filter ----------------------------------------

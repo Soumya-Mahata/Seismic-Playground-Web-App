@@ -36,7 +36,7 @@ SMOOTH_WIDTH_HZ_DEFAULT = 2.0      # Hann-kernel smoothing width
 # ── 7) Trace balancing ───────────────────────────────────────────────────
 NORM_WINDOW_S_DEFAULT = 1.5        # seconds, from t=0
 
-# ── 8) Top mute ───────────────────────────────────────────────────────────
+# ── 8) Mute (top mute and/or surgical mute) ──────────────────────────────
 MUTE_TTOP_DEFAULT = 0.05           # seconds
 MUTE_TAPER_DEFAULT = 0.05          # seconds
 

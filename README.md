@@ -59,10 +59,15 @@ available (see "Synthetic test data" below).
   survey), an optional early **brute stack + fold map** QC, then build
   shot gathers.
 - **Pre-Stack Conditioning** (shot domain) — band-pass, AGC, **trace
-  edit/kill + de-spiking**, top mute, trace balancing, F-K dip filter
-  (**auto polygon or click-drawn**), **multiple suppression**
-  (predictive/gap deconvolution), spiking deconvolution — each with
-  before/after and spectrum QC.
+  edit/kill + de-spiking**, **mute** (moveout-following or flat top
+  mute, or a surgical box mute), trace balancing, F-K dip filter (an
+  **auto "Apparent-velocity wedge"**, derived from a single velocity
+  cutoff and shown accept/reject-complementary so ground roll is
+  genuinely removed, or a **custom numeric-point polygon**), **multiple
+  suppression** (predictive/gap deconvolution), spiking deconvolution —
+  each with before/after and spectrum QC (F-K spectra are displayed over
+  the non-negative frequency half, matching standard reference
+  convention).
 - **CDP Sort & Binning** — re-groups the now-conditioned data by CDP,
   with a fold map and a semblance preview, right before velocity
   analysis (matching standard practice).
@@ -71,7 +76,9 @@ available (see "Synthetic test data" below).
   flagging**, **click-to-pick directly on the semblance panel**, manual
   table-based correction/exclusion, and a **Constant-Velocity-Stack
   (CVS)** panel as a complementary, amplitude-domain check; NMO (both
-  passes), surface-consistent residual statics, simplified DMO.
+  passes), surface-consistent residual statics, simplified DMO, and
+  **data regularisation** (interpolating each CDP gather onto a common
+  offset grid between pass-1 and pass-2 analysis — report Sec 6.11).
 - **Stacking** — fold-normalized CDP stack with a fold map and
   adjustable display (colormap / clip / gain / polarity).
 - **Post-Stack Processing** — random noise attenuation, a second
@@ -83,7 +90,9 @@ available (see "Synthetic test data" below).
   curvature, and an approximate well-to-seismic tie.
 - **Attributes** — RMS amplitude, instantaneous amplitude/phase/
   frequency, **sweetness**, **variance**, **coherence/similarity**,
-  dominant frequency — with attribute-along-horizon extraction.
+  dominant frequency — with attribute-along-horizon extraction, each
+  displayed with a Petrel/industry-convention-matched colorscale (see
+  "Attribute display colors" below).
 - **Export** — processed SEG-Y, CSV, NumPy, horizon/fault CSV, attribute
   CSV, interactive HTML figures, and a text/JSON processing report.
 - **Processing history** — every stage's parameters are logged;
@@ -104,17 +113,17 @@ Build shot gathers ── (an optional throwaway CDP grouping is available
         ▼
 Pre-Stack Conditioning (shot domain)
   Band-pass → AGC → Trace edit/kill/de-spike → Mute → Balance →
-  F-K filter (auto or click-drawn polygon) → Multiple suppression →
-  Deconvolution                                          (QC after each)
+  F-K filter (auto apparent-velocity wedge or custom numeric polygon) →
+  Multiple suppression → Deconvolution            (QC after each)
         │
         ▼
 CDP Sort / Binning  (re-group by CDP; fold map; semblance preview)
         │
         ▼
 Velocity Analysis Pass 1 (auto-pick / click-pick / CVS)
-        │            ──► NMO 1 ──► Residual Statics ──► DMO ──► Inverse NMO
+        │   ──► NMO 1 ──► Residual Statics ──► DMO ──► Inverse NMO ──► Data Regularisation
         ▼
-Velocity Analysis Pass 2 (refined) ──► Final NMO
+Velocity Analysis Pass 2 (refined, on regularized offsets) ──► Final NMO
         │
         ▼
 Stack ──► Random Noise Attenuation ──► Deconvolution ──► Time-Variant Filter
@@ -151,6 +160,20 @@ also generate a fresh, larger one on demand. **It is labeled as
 synthetic everywhere it appears in the UI and is never presented as
 real acquired data.** Every processing step still performs its real
 computation on this data — only the input is synthetic.
+
+The Data Management page's default trace/group spacing (`dx`) for a
+freshly generated survey is **6.25 m** (`k_max = 0.08 cycles/m`), not
+the more "real-world" 25 m. This is a deliberate display choice, not a
+processing one: it's the receiver spacing that makes the F-K filter
+tab's default "Apparent-velocity wedge" polygon taper across the
+spectrum the same proportion of the frequency axis that the reference
+material's own F-K polygon figures do, rather than saturating to the
+full wavenumber width within the first ~15% of the axis the way a
+coarser 25 m spacing would. Raise `dx` on that page for a coarser, more
+aliasing-prone survey instead; `generate_synthetic_survey()` itself
+still defaults to 25 m when called directly (e.g. from a script),
+since this is purely a UI default for a good-looking default F-K
+preview.
 
 The full pipeline was validated end to end against this data's known
 ground truth (see `tests/manual_pipeline_check.py`): all 5 reflectors
@@ -208,6 +231,8 @@ seismic-playground/
 │   │                           #   below), Constant-Velocity-Stack analysis
 │   ├── nmo.py                 # NMO / inverse NMO / DMO (bug-fixed, see below)
 │   ├── statics.py             # surface-consistent residual statics
+│   ├── regularization.py      # data regularisation — interpolate each CDP
+│   │                           #   gather onto a common offset grid (report Sec 6.11)
 │   ├── stacking.py            # fold-normalized stacking
 │   ├── migration.py           # Kirchhoff migration + final scaling
 │   ├── attributes.py          # RMS, envelope, phase, frequency, sweetness,
@@ -422,6 +447,23 @@ attribute section:
   from the seismic — a real refinement, noted under "Future
   improvements."
 
+### Attribute display colors
+
+Each attribute on the Attributes page is drawn with a colorscale chosen
+to match Petrel/industry display convention rather than one generic
+rainbow for everything (`modules/attributes.py::ATTRIBUTE_COLORSCALE_MAP`,
+which documents the reasoning and sourcing for every entry in full):
+
+| Attribute | Colorscale | Why |
+|---|---|---|
+| RMS Amplitude, Sweetness | Turbo (sequential, cool→warm) | The training report's explicit instruction: "a warm-cool scale for RMS amplitude and sweetness" |
+| Instantaneous Amplitude (Envelope) | Hot (black→red→orange→yellow→white) | Single-polarity attribute — neutral/dark background at low envelope, per AASPI convention and the reference figures |
+| Instantaneous Phase | HSV (cyclic color wheel) | Phase wraps at ±π; a cyclic hue-based scale avoids a false edge at the wrap, matching the reference figures' vivid color wheel |
+| Instantaneous Frequency | Plasma (dark purple→yellow) | Kept visually distinct from the amplitude family, matching the reference figures |
+| Variance | Custom high-contrast grayscale + red spike | The report's explicit instruction: "a high-contrast scale for variance to sharply separate discontinuities from the background" |
+| Coherence / Similarity | Greys (black=low, white=high) | Standard industry convention (AASPI): low coherence/faults render dark, continuous reflectivity renders bright |
+| Dominant Frequency | Turbo | Visual consistency with the other frequency/amplitude panels |
+
 ---
 
 ## Example Usage
@@ -433,9 +475,11 @@ attribute section:
 2. Work through **Pre-Stack Conditioning** tab by tab (band-pass → AGC →
    trace de-spike → trace kill → mute → balance → F-K filter → multiple
    suppression → deconvolution) — each has a "Run" button and
-   before/after QC. For the F-K filter, try "Build my own (numeric
-   points)" and zoom into the spectrum to read off a few (k, f)
-   coordinates to enter as a custom reject polygon.
+   before/after QC. For the F-K filter, the default "Apparent-velocity
+   wedge" (set by a single velocity-cutoff slider) is recommended; for a
+   hand-specified shape instead, switch "Polygon source" to "Custom
+   (numeric points)" and zoom into the spectrum to read off a few (k, f)
+   coordinates to enter.
 3. **CDP Sort & Binning** — re-group into CDP gathers, check the fold
    map, preview a semblance panel.
 4. In **Velocity, NMO & DMO**, run Pass 1, review the reliability chart,

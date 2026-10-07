@@ -36,7 +36,8 @@ PIPELINE_STAGES: List[Stage] = [
     Stage("bandpass", "Band-Pass Filter", "Trapezoidal frequency-domain band-pass (shot domain).", "2"),
     Stage("agc", "Amplitude Recovery (AGC)", "Sliding-window automatic gain control (shot domain).", "3"),
     Stage("trace_edit", "Trace Edit / Kill / De-spike", "Kill dead/noisy traces; remove burst-noise spikes.", "4"),
-    Stage("mute", "Top Mute", "Cosine-tapered top mute (shot domain).", "5"),
+    Stage("mute", "Mute", "Top mute (moveout-following or flat) or surgical mute, cosine-tapered "
+          "(shot domain).", "5"),
     Stage("balance", "Trace Balancing", "Scalar RMS normalization per trace (shot domain).", "6"),
     Stage("fk", "F-K Dip Filter", "2-D FFT polygon mask — ground-roll attenuation (shot domain).", "7"),
     Stage("mult_supp", "Multiple Suppression", "Predictive (gap) deconvolution — attenuates short-period "
