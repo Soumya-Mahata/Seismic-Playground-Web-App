@@ -1,12 +1,10 @@
 """
-modules/stacking.py — Step 17 of the reference pipeline
+modules/stacking.py — CDP Stacking
 ===========================================================
-Fold-normalized CDP stacking. Ported directly from
-`Seismic_Processing_CORRECTED.ipynb` (`fold_normalized_stack`) — no
-change to the math. A naive (un-normalized) mean stack is also provided
-purely as a labelled comparison, matching the notebook's own QC figure
-(fold-normalization matters wherever fold varies across the gather, e.g.
-after a stretch mute zeroes some near-time, far-offset samples).
+Fold-normalized CDP stacking. A naive (un-normalized) mean stack is
+also provided purely as a labelled comparison (fold-normalization
+matters wherever fold varies across the gather, e.g. after a stretch
+mute zeroes some near-time, far-offset samples).
 """
 
 from __future__ import annotations
@@ -44,8 +42,8 @@ def build_stack_section(gathers: Dict[int, dict], cdp_list: List[int],
     (n_cdp, n_samples) matrices, plus a naive-mean comparison.
 
     Also writes `stack_dmo`/`stack_naive_mean`/`fold` back into each
-    gather dict (matching the notebook's own key names) so single-CDP
-    before/after QC plots can reach into the per-gather values too.
+    gather dict so single-CDP before/after QC plots can reach into the
+    per-gather values too.
     """
     stacks, folds, naive = [], [], []
     for cdp in cdp_list:

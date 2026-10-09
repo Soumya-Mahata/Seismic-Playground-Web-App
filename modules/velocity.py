@@ -1,28 +1,28 @@
 """
-modules/velocity.py — Steps 10 & 15 of the reference pipeline
-=================================================================
+modules/velocity.py — Velocity Analysis (Semblance, Autopicking, Lateral Interpolation)
+=========================================================================================
 Windowed semblance (Neidell & Taner coherence) velocity analysis, an
 automatic picker, and the multi-CDP picking driver that interpolates
 picks into a 2-D V(t, CDP) field. Used identically for both the 1st
 (approximate) and 2nd (refined) velocity-analysis passes.
 
-`compute_semblance_vectorized` is ported directly from
-`Seismic_Processing_CORRECTED.ipynb` with no change to the math — it was
-verified against a synthetic gather with known reflector velocities and
-correctly locates every true velocity to within ~1-2% (see
-`tests/test_pipeline.py`).
+`compute_semblance_vectorized` implements the standard windowed-semblance
+formula with no change to the math — it was verified against a synthetic
+gather with known reflector velocities and correctly locates every true
+velocity to within ~1-2% (see `tests/test_pipeline.py`).
 
-`autopick_velocity` REPLACES the notebook's picker. See "Why the picker
-was replaced" below — a deliberate, evidence-based deviation from the
-source notebook, not a stylistic change.
+`autopick_velocity` uses a confidence-gated local-maximum walk rather
+than a whole-path dynamic-programming optimizer. See "Why this picker
+design" below — a deliberate, evidence-based design choice, not a
+stylistic one.
 
-Why the picker was replaced
+Why this picker design
 ----------------------------
-The notebook's picker finds the single path through the whole semblance
-panel that maximizes cumulative coherence minus a jump penalty. Testing
-it against synthetic gathers with known reflector velocities (flat
-reflectors at 0.35-2.2 s, 1900-3400 m/s) showed two reproducible
-failures:
+A whole-path dynamic-programming optimizer finds the single path through
+the whole semblance panel that maximizes cumulative coherence minus a
+jump penalty. Testing it against synthetic gathers with known reflector
+velocities (flat reflectors at 0.35-2.2 s, 1900-3400 m/s) showed two
+reproducible failures:
 
 1. **Systematic under-tracking of deep, isolated peaks.** Real
    reflection coherence is "spotty" in time — strong at a reflector,
@@ -94,7 +94,7 @@ def compute_semblance_vectorized(gather: np.ndarray, offsets: np.ndarray,
     single CDP gather, evaluated over a range of trial stacking velocities.
     Returns a (n_velocities, n_samples) semblance panel in [0, 1].
 
-    Unchanged from `Seismic_Processing_CORRECTED.ipynb` — verified to
+    Implements the standard semblance formula unchanged — verified to
     correctly locate known reflector velocities to within ~1-2% (see
     module docstring)."""
     ntr, nt = gather.shape
@@ -128,8 +128,8 @@ def autopick_velocity(semblance: np.ndarray, velocities: np.ndarray, t: np.ndarr
                        enforce_non_decreasing: bool = True,
                        non_decrease_tolerance: float = 0.985) -> Tuple[np.ndarray, np.ndarray]:
     """Confidence-gated local-maximum walk, seeded from the panel's
-    strongest peak (see module docstring for why this replaces the
-    notebook's whole-path dynamic-programming picker).
+    strongest peak (see module docstring for why this is used instead of
+    a whole-path dynamic-programming picker).
 
     Returns (velocity_curve, confidence_curve) — confidence is the raw
     semblance value accepted at each time sample, used by

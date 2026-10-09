@@ -4,6 +4,13 @@ views/velocity_nmo_view.py — Velocity Analysis, NMO, Statics, DMO (10-16)
 The most interactive part of the app: automatic velocity picking with
 per-analysis-CDP reliability flagging, manual pick correction/exclusion,
 and the two NMO passes / residual statics / DMO sandwich between them.
+
+Every tab states its own readiness (✓ / ⚠ / ⛔) from the dependency
+engine instead of waiting for the previous tab to have been run. What a
+tab genuinely needs is shown in its ⛔ message — e.g. NMO needs a
+velocity field; velocity analysis needs CDP gathers — and anything that
+is merely the usual order (statics before DMO, regularisation before the
+second velocity pass, ...) is a ⚠ the person can override.
 """
 
 from __future__ import annotations
@@ -15,22 +22,29 @@ import pandas as pd
 import streamlit as st
 
 import config as cfg
-from modules import nmo as nmo_mod
 from modules import regularization as reg_mod
-from modules import statics as statics_mod
+from modules import stage_ops
 from modules import velocity as vel_mod
 from utils import session_state as ss
+from utils import workflow_ui as wf
 from utils.click_picking import numeric_point_form
 from visualization import seismic_plots, velocity_plots
 
 
-def _velocity_pass_ui(*, pass_label: str, stage_id: str, input_key: str, field_key: str,
-                       analysis_key: str, results_key: str, overrides_key: str, excluded_key: str,
-                       offsets_key: str = "offsets"):
+def _velocity_pass_ui(*, pass_label: str, stage_id: str, field_key: str,
+                       analysis_key: str, results_key: str, overrides_key: str, excluded_key: str):
+    """One semblance velocity-analysis pass. What it reads (and with which
+    offsets) is whatever the dependency engine resolved for this stage —
+    recorded in the history entry — rather than a key the page hard-codes."""
+    chk = wf.show_status(stage_id)
+    if not chk.can_run and not ss.is_stage_done(stage_id):
+        return False
     survey = st.session_state["survey"]
     gathers = st.session_state["gathers"]
     cdp_list = st.session_state["cdp_list"]
     dt, ns, twt = survey.sample_interval, survey.num_samples, survey.twt
+    if chk.can_run:
+        st.caption(f"Will analyse: **{wf.input_name(chk)}** gathers.")
 
     with st.expander("Parameters", expanded=st.session_state[field_key] is None):
         c1, c2, c3 = st.columns(3)
@@ -55,29 +69,20 @@ def _velocity_pass_ui(*, pass_label: str, stage_id: str, input_key: str, field_k
                 help="Analysis CDPs whose pick deviates from the lateral median trend by more "
                      "than this fraction are flagged and excluded from the field by default.")
 
-    if st.button(f"Run {pass_label}", type="primary", key=f"run_{stage_id}"):
-        velocities = np.linspace(vmin, vmax, cfg.VELOCITY_N_DEFAULT)
+    if wf.run_button(stage_id, f"Run {pass_label}", key=f"run_{stage_id}"):
         prog = st.progress(0.0, text="Picking velocities...")
-        Vfield, analysis, results = vel_mod.pick_velocity_field(
-            gathers, cdp_list, input_key, velocities, dt, ns,
-            n_analysis=int(n_analysis), min_abs_offset=min_offset, label=stage_id,
-            window_len=int(window_len), reliability_threshold=reliability_threshold,
-            autopick_kwargs=dict(min_time=min_time, search_half_width_ms=search_w,
-                                  min_confidence=min_conf, smooth_sigma=int(smooth)),
-            manual_overrides=st.session_state[overrides_key], excluded_cdps=st.session_state[excluded_key],
-            progress_cb=lambda f: prog.progress(f, text="Picking velocities..."), offsets_key=offsets_key)
-        prog.progress(1.0)
-        st.session_state["velocities"] = velocities
-        st.session_state[field_key] = Vfield
-        st.session_state[analysis_key] = analysis
-        st.session_state[results_key] = results
-        n_reliable = sum(r.is_reliable for r in results.values())
-        ss.mark_stage_done(stage_id, {"n_analysis": len(analysis), "reliable": f"{n_reliable}/{len(analysis)}"})
-        st.rerun()
+        wf.execute(stage_ops.run_velocity, stage_id,
+                   vmin=vmin, vmax=vmax, n_analysis=int(n_analysis), min_offset=min_offset,
+                   window_len=int(window_len), min_time=min_time, search_w=search_w,
+                   min_conf=min_conf, smooth=int(smooth), reliability_threshold=reliability_threshold,
+                   progress_cb=lambda f: prog.progress(f, text="Picking velocities..."))
 
     if not ss.is_stage_done(stage_id):
         return False
 
+    entry = ss.entry(stage_id)
+    input_key, offsets_key = entry.input_key, entry.offsets_key
+    st.caption(f"Analysed: **{wf.input_name(entry)}** gathers.")
     Vfield = st.session_state[field_key]
     analysis = st.session_state[analysis_key]
     results: Dict[int, vel_mod.VelocityPickResult] = st.session_state[results_key]
@@ -178,17 +183,29 @@ def _velocity_pass_ui(*, pass_label: str, stage_id: str, input_key: str, field_k
     return True
 
 
+def _example_cdp(cdp_list, key):
+    return st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key=key)
+
+
 def render():
     st.header("🎯 Velocity Analysis, NMO & DMO")
     st.caption("Velocity analysis (auto-pick, manual click-pick, or CVS), NMO, residual statics, "
-                "and DMO — operating on the CDP gathers built in CDP Sort & Binning.")
+                "and DMO — operating on the CDP gathers built in CDP Sort & Binning. Each tab shows "
+                "whether it can run now; you do not have to run the tabs in order — only the inputs "
+                "a tab genuinely needs must exist.")
 
-    if not ss.require_stage("cdp_sort"):
+    if st.session_state["gathers"] is None:
+        wf.show_status("vel1")          # ⛔ names the missing CDP gathers and where to make them
         return
     survey = st.session_state["survey"]
     gathers = st.session_state["gathers"]
     cdp_list = st.session_state["cdp_list"]
-    dt, twt = survey.sample_interval, survey.twt
+    twt = survey.twt
+
+    wf.data_state_caption("cdp", "Current pre-NMO CDP gathers")
+    wf.stale_banner(["vel1", "nmo1", "statics", "dmo", "inv_nmo", "data_reg", "vel2", "nmo_final"])
+    wf.undo_panel(["vel1", "nmo1", "statics", "dmo", "inv_nmo", "data_reg", "vel2", "nmo_final"],
+                  "undo_cdp_domain")
 
     tabs = st.tabs(["Velocity Pass 1", "NMO Pass 1", "Residual Statics",
                     "DMO Correction", "Inverse NMO", "Data Regularisation",
@@ -196,175 +213,146 @@ def render():
 
     with tabs[0]:
         _velocity_pass_ui(pass_label="Velocity Analysis — Pass 1 (approximate)", stage_id="vel1",
-                           input_key="traces", field_key="Vfield_1", analysis_key="analysis_1",
-                           results_key="vel_results_1", overrides_key="manual_overrides_1", excluded_key="excluded_cdps_1")
+                           field_key="Vfield_1", analysis_key="analysis_1",
+                           results_key="vel_results_1", overrides_key="manual_overrides_1",
+                           excluded_key="excluded_cdps_1")
 
     with tabs[1]:
-        if not ss.require_stage("vel1"):
-            pass
-        else:
+        chk = wf.show_status("nmo1")
+        if chk.can_run:
             st.markdown("Applies the pass-1 stacking-velocity field, flattening reflections so they "
                          "can be identified/stacked coherently. A stretch mute removes samples where "
                          "NMO would distort the wavelet too much to be usable.")
             stretch = st.slider("Stretch mute (fractional)", 0.05, 1.0, cfg.NMO_STRETCH_MUTE_DEFAULT, key="nmo1_stretch")
-            if st.button("Run NMO — Pass 1", type="primary", key="run_nmo1"):
-                for cdp, g in gathers.items():
-                    out, live = nmo_mod.nmo_correction(g["traces"], g["offsets"],
-                                                        g["vrms_field_vel1"], dt, stretch_mute=stretch)
-                    g["traces_nmo1"], g["nmo1_live_mask"] = out, live
-                ss.mark_stage_done("nmo1", {"stretch_mute": stretch})
-                st.rerun()
-            if ss.is_stage_done("nmo1"):
-                st.success("✅ NMO pass 1 applied.")
-                cdp = st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key="nmo1_cdp")
-                g = gathers[cdp]
-                st.plotly_chart(seismic_plots.plot_before_after(
-                    g["traces"], g["traces_nmo1"], np.sort(g["offsets"]), twt,
-                    title_before="Before NMO", title_after="After NMO — flattened", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_2")
+            if wf.run_button("nmo1", "Run NMO — Pass 1", key="run_nmo1"):
+                wf.execute(stage_ops.run_nmo1, stretch_mute=stretch)
+        if ss.is_stage_done("nmo1"):
+            e = ss.entry("nmo1")
+            st.success(f"✅ NMO pass 1 applied to {wf.input_name(e)} gathers.")
+            cdp = _example_cdp(cdp_list, "nmo1_cdp")
+            g = gathers[cdp]
+            st.plotly_chart(seismic_plots.plot_before_after(
+                g[e.input_key], g["traces_nmo1"], np.sort(g[e.offsets_key]), twt,
+                title_before="Before NMO", title_after="After NMO — flattened", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_2")
 
     with tabs[2]:
-        if not ss.require_stage("nmo1"):
-            pass
-        else:
+        chk = wf.show_status("statics")
+        if chk.can_run:
             st.markdown("Surface-consistent residual statics: cross-correlates each NMO-flattened "
                          "trace against its CDP's fold-normalized pilot trace, then solves for "
                          "per-shot and per-receiver static shifts by least squares.")
             max_shift = st.slider("Max static shift search (ms)", 2.0, 100.0, cfg.MAX_STATIC_SHIFT_S_DEFAULT * 1000,
                                    key="statics_maxshift") / 1000.0
-            if st.button("Solve & apply residual statics", type="primary", key="run_statics"):
+            if wf.run_button("statics", "Solve & apply residual statics", key="run_statics"):
                 with st.spinner("Solving surface-consistent statics..."):
-                    shot_static, receiver_static, diag = statics_mod.solve_residual_statics(
-                        gathers, "traces_nmo1", "nmo1_live_mask", dt, max_shift_s=max_shift)
-                    statics_mod.apply_residual_statics(gathers, "traces", "traces_statics",
-                                                         shot_static, receiver_static, dt)
-                st.session_state["shot_static"] = shot_static
-                st.session_state["receiver_static"] = receiver_static
-                st.session_state["static_diag"] = diag
-                ss.mark_stage_done("statics", diag)
-                st.rerun()
-            if ss.is_stage_done("statics"):
-                diag = st.session_state["static_diag"]
-                st.success("✅ Residual statics solved and applied.")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Shots solved", diag["n_shots"])
-                c2.metric("Receivers solved", diag["n_receivers"])
-                c3.metric("RMS residual shift", f"{diag['rms_observed_shift_ms']:.2f} ms")
-                cdp = st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key="statics_cdp")
-                g = gathers[cdp]
-                st.plotly_chart(seismic_plots.plot_before_after(
-                    g["traces"], g["traces_statics"], np.sort(g["offsets"]), twt,
-                    title_before="Before statics", title_after="After statics", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_3")
+                    wf.execute(stage_ops.run_statics, max_shift_s=max_shift)
+        if ss.is_stage_done("statics"):
+            e = ss.entry("statics")
+            diag = st.session_state["static_diag"]
+            st.success("✅ Residual statics solved and applied.")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Shots solved", diag["n_shots"])
+            c2.metric("Receivers solved", diag["n_receivers"])
+            c3.metric("RMS residual shift", f"{diag['rms_observed_shift_ms']:.2f} ms")
+            cdp = _example_cdp(cdp_list, "statics_cdp")
+            g = gathers[cdp]
+            st.plotly_chart(seismic_plots.plot_before_after(
+                g[e.input_key], g["traces_statics"], np.sort(g[e.offsets_key]), twt,
+                title_before="Before statics", title_after="After statics", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_3")
 
     with tabs[3]:
-        if not ss.require_stage("statics"):
-            pass
-        else:
+        chk = wf.show_status("dmo")
+        if chk.can_run:
             st.markdown("**Simplified DMO** (documented limitation: a common-offset time-stretch "
-                         "approximation, not a full log-stretch/Kirchhoff DMO operator — see README).")
-            if st.button("Run DMO correction", type="primary", key="run_dmo"):
-                for cdp, g in gathers.items():
-                    nmo1s, _ = nmo_mod.nmo_correction(g["traces_statics"], g["offsets"], g["vrms_field_vel1"], dt,
-                                                        stretch_mute=st.session_state.get("nmo1_stretch", cfg.NMO_STRETCH_MUTE_DEFAULT))
-                    g["traces_nmo1_statics"] = nmo1s
-                    g["traces_dmo"] = nmo_mod.dmo_correction(nmo1s, g["offsets"], g["vrms_field_vel1"], dt)
-                ss.mark_stage_done("dmo", {})
-                st.rerun()
-            if ss.is_stage_done("dmo"):
-                st.success("✅ DMO correction applied.")
-                cdp = st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key="dmo_cdp")
-                g = gathers[cdp]
-                st.plotly_chart(seismic_plots.plot_before_after(
-                    g["traces_nmo1_statics"], g["traces_dmo"], np.sort(g["offsets"]), twt,
-                    title_before="NMO'd (pass 1)", title_after="After DMO", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_4")
+                         "approximation, not a full log-stretch/Kirchhoff DMO operator — see README). "
+                         "It NMO-corrects its own input with the pass-1 velocities first, so it does not "
+                         "need NMO Pass 1 to have been run.")
+            stretch_dmo = st.slider("Stretch mute (fractional)", 0.05, 1.0,
+                                     float(st.session_state.get("nmo1_stretch", cfg.NMO_STRETCH_MUTE_DEFAULT)),
+                                     key="dmo_stretch")
+            if wf.run_button("dmo", "Run DMO correction", key="run_dmo"):
+                wf.execute(stage_ops.run_dmo, stretch_mute=stretch_dmo)
+        if ss.is_stage_done("dmo"):
+            e = ss.entry("dmo")
+            st.success(f"✅ DMO correction applied to {wf.input_name(e)} gathers.")
+            cdp = _example_cdp(cdp_list, "dmo_cdp")
+            g = gathers[cdp]
+            st.plotly_chart(seismic_plots.plot_before_after(
+                g["traces_nmo1_statics"], g["traces_dmo"], np.sort(g[e.offsets_key]), twt,
+                title_before="NMO'd (pass 1 velocities)", title_after="After DMO", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_4")
 
     with tabs[4]:
-        if not ss.require_stage("dmo"):
-            pass
-        else:
+        chk = wf.show_status("inv_nmo")
+        if chk.can_run:
             st.markdown("Undoes the pass-1 NMO on the DMO-corrected gathers, so a refined velocity "
                          "analysis (next step) starts from data with the DMO improvement folded in "
                          "but without the pass-1 (approximate) velocity field's bias.")
-            if st.button("Run inverse NMO", type="primary", key="run_invnmo"):
-                for cdp, g in gathers.items():
-                    g["traces_inv_nmo"] = nmo_mod.inverse_nmo_correction(g["traces_dmo"], g["offsets"],
-                                                                          g["vrms_field_vel1"], dt)
-                ss.mark_stage_done("inv_nmo", {})
-                st.rerun()
-            if ss.is_stage_done("inv_nmo"):
-                st.success("✅ Inverse NMO applied.")
-                cdp = st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key="invnmo_cdp")
-                g = gathers[cdp]
-                st.plotly_chart(seismic_plots.plot_gather(g["traces_inv_nmo"], g["offsets"], twt,
-                                 title=f"CDP {cdp} — after inverse NMO"), theme=None, key="velocity_nmo_view_chart_2003")
+            if wf.run_button("inv_nmo", "Run inverse NMO", key="run_invnmo"):
+                wf.execute(stage_ops.run_inverse_nmo)
+        if ss.is_stage_done("inv_nmo"):
+            e = ss.entry("inv_nmo")
+            st.success("✅ Inverse NMO applied.")
+            cdp = _example_cdp(cdp_list, "invnmo_cdp")
+            g = gathers[cdp]
+            st.plotly_chart(seismic_plots.plot_gather(g["traces_inv_nmo"], g[e.offsets_key], twt,
+                             title=f"CDP {cdp} — after inverse NMO"), theme=None, key="velocity_nmo_view_chart_2003")
 
     with tabs[5]:
-        if not ss.require_stage("inv_nmo"):
-            pass
-        else:
+        chk = wf.show_status("data_reg")
+        if chk.can_run:
             st.markdown(
-                "**Data Regularisation** (report Sec 6.11): interpolates every CDP gather's "
+                "**Data Regularisation** interpolates every CDP gather's "
                 "irregularly sampled offsets onto one shared, regularly spaced offset grid for the "
-                "whole survey. This is a prerequisite for reliable subsequent velocity analysis, "
-                "stacking, and migration — real fold is rarely evenly spaced across offset (gaps, "
+                "whole survey. It is *recommended* before a refined velocity analysis, pre-stack "
+                "migration and stacking — real fold is rarely evenly spaced across offset (gaps, "
                 "dropped channels, split-spread irregularities), which biases a semblance velocity "
-                "scan and any migration operator that sums over offset."
+                "scan and any migration operator that sums over offset — but it is optional: those "
+                "steps can run without it."
             )
             n_offsets = st.slider("Regularized offsets per CDP", 11, 61, 31, step=2, key="reg_noffsets")
-            if st.button("Run data regularisation", type="primary", key="run_datareg"):
+            if wf.run_button("data_reg", "Run data regularisation", key="run_datareg"):
                 with st.spinner("Interpolating gathers onto a regular offset grid..."):
-                    target_offsets = reg_mod.regularize_all_gathers(
-                        gathers, input_key="traces_inv_nmo", offsets_key="offsets",
-                        n_offsets=int(n_offsets))
-                st.session_state["regular_offsets"] = target_offsets
-                ss.mark_stage_done("data_reg", {"n_offsets": int(n_offsets)})
-                st.rerun()
-            if ss.is_stage_done("data_reg"):
-                before_fold, after_fold = reg_mod.fold_before_after(gathers)
-                st.success(f"✅ Data regularised — fold before: {before_fold.min()}-{before_fold.max()} "
-                            f"(irregular offsets) → after: {after_fold.min()}-{after_fold.max()} live "
-                            f"traces on a common {len(st.session_state['regular_offsets'])}-offset grid.")
-                cdp = st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key="datareg_cdp")
-                g = gathers[cdp]
-                order = np.argsort(g["offsets"])
-                st.plotly_chart(seismic_plots.plot_before_after(
-                    g["traces_inv_nmo"][order], g["traces_regularized"],
-                    np.sort(g["offsets"]), twt, x_values_after=g["offsets_regularized"],
-                    title_before="Before (irregular offsets)", title_after="After (regularized offsets)",
-                    x_title="Offset (m)"), theme=None, key="datareg_before_after")
+                    wf.execute(stage_ops.run_data_reg, n_offsets=int(n_offsets))
+        if ss.is_stage_done("data_reg"):
+            e = ss.entry("data_reg")
+            # entry.offsets_key is the regularised (output) grid; the "before" panel needs the
+            # offsets of the irregular gathers this step read.
+            in_off_key = stage_ops.data_keys(ss.workflow(), e.consumed["data"])[1]
+            before_fold, after_fold = reg_mod.fold_before_after(gathers, offsets_key=in_off_key)
+            st.success(f"✅ Data regularised — fold before: {before_fold.min()}-{before_fold.max()} "
+                        f"(irregular offsets) → after: {after_fold.min()}-{after_fold.max()} live "
+                        f"traces on a common {len(st.session_state['regular_offsets'])}-offset grid.")
+            cdp = _example_cdp(cdp_list, "datareg_cdp")
+            g = gathers[cdp]
+            order = np.argsort(g[in_off_key])
+            st.plotly_chart(seismic_plots.plot_before_after(
+                g[e.input_key][order], g["traces_regularized"],
+                np.sort(g[in_off_key]), twt, x_values_after=g["offsets_regularized"],
+                title_before="Before (irregular offsets)", title_after="After (regularized offsets)",
+                x_title="Offset (m)"), theme=None, key="datareg_before_after")
 
     with tabs[6]:
-        if not ss.require_stage("data_reg"):
-            pass
-        else:
-            st.markdown("Refined semblance velocity analysis on the regularized gathers — the "
-                         "report's Sec 6.12 \"RMS Velocity Analysis\", run after data regularisation "
-                         "so the semblance scan sees a consistent offset sampling across every CDP.")
-            _velocity_pass_ui(pass_label="RMS Velocity Analysis (Pass 2, on regularized data)", stage_id="vel2",
-                               input_key="traces_regularized", field_key="Vfield_2", analysis_key="analysis_2",
-                               results_key="vel_results_2", overrides_key="manual_overrides_2",
-                               excluded_key="excluded_cdps_2", offsets_key="offsets_regularized")
+        st.markdown("Refined semblance velocity analysis. It is normally run on regularised gathers so "
+                     "the scan sees a consistent offset sampling across every CDP; if they have not "
+                     "been regularised you will be told, and may continue.")
+        _velocity_pass_ui(pass_label="RMS Velocity Analysis (Pass 2)", stage_id="vel2",
+                           field_key="Vfield_2", analysis_key="analysis_2",
+                           results_key="vel_results_2", overrides_key="manual_overrides_2",
+                           excluded_key="excluded_cdps_2")
 
     with tabs[7]:
-        if not ss.require_stage("vel2"):
-            pass
-        else:
-            st.markdown("Applies the refined pass-2 stacking-velocity field to the regularized "
-                         "gathers — this is the gather that will be stacked next.")
+        chk = wf.show_status("nmo_final")
+        if chk.can_run:
+            st.markdown("Applies the best stacking-velocity field available (pass 2, else pass 1) to "
+                         "the current pre-NMO gathers — this is the gather that will be stacked next.")
             stretch2 = st.slider("Stretch mute (fractional)", 0.05, 1.0, cfg.NMO_STRETCH_MUTE_DEFAULT, key="nmofinal_stretch")
-            if st.button("Run final NMO", type="primary", key="run_nmofinal"):
-                for cdp, g in gathers.items():
-                    out, live = nmo_mod.nmo_correction(g["traces_regularized"], g["offsets_regularized"],
-                                                        g["vrms_field_vel2"], dt, stretch_mute=stretch2)
-                    # AND with the regularization live-mask so offsets outside a gather's real fold
-                    # (zero-filled by interpolation, not real data) don't inflate the stack's fold count.
-                    live = live & g["live_regularized"][:, None]
-                    g["traces_nmo_final"], g["nmo_final_live_mask"] = out, live
-                ss.mark_stage_done("nmo_final", {"stretch_mute": stretch2})
-                st.rerun()
-            if ss.is_stage_done("nmo_final"):
-                st.success("✅ Final NMO applied — ready to stack.")
-                cdp = st.selectbox("Example CDP", cdp_list, index=len(cdp_list) // 2, key="nmofinal_cdp")
-                g = gathers[cdp]
-                st.plotly_chart(seismic_plots.plot_before_after(
-                    g["traces_regularized"], g["traces_nmo_final"], g["offsets_regularized"], twt,
-                    title_before="Before final NMO", title_after="After final NMO", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_5")
+            if wf.run_button("nmo_final", "Run final NMO", key="run_nmofinal"):
+                wf.execute(stage_ops.run_nmo_final, stretch_mute=stretch2)
+        if ss.is_stage_done("nmo_final"):
+            e = ss.entry("nmo_final")
+            st.success(f"✅ Final NMO applied to {wf.input_name(e)} gathers — ready to stack.")
+            cdp = _example_cdp(cdp_list, "nmofinal_cdp")
+            g = gathers[cdp]
+            st.plotly_chart(seismic_plots.plot_before_after(
+                g[e.input_key], g["traces_nmo_final"], g[e.offsets_key], twt,
+                title_before="Before final NMO", title_after="After final NMO", x_title="Offset (m)"), theme=None, key="velocity_nmo_view_chart_5")

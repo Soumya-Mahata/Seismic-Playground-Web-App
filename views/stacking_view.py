@@ -5,36 +5,36 @@ from __future__ import annotations
 import numpy as np
 import streamlit as st
 
-from modules.stacking import build_stack_section
+from modules import stage_ops
 from utils import session_state as ss
+from utils import workflow_ui as wf
 from visualization import controls, seismic_plots
 
 
 def render():
     st.header("📚 Stacking")
-    st.caption("Fold-normalized CDP stack, from the final-NMO-corrected gathers.")
+    st.caption("Fold-normalized CDP stack of NMO-corrected gathers. Stacking un-flattened gathers "
+                "would smear every reflection, so a moveout-corrected input is genuinely required; "
+                "which NMO pass supplies it is your choice.")
 
-    if not ss.require_stage("nmo_final"):
+    chk = wf.show_status("stack")
+    if not chk.can_run:
         return
 
     gathers = st.session_state["gathers"]
     cdp_list = st.session_state["cdp_list"]
     survey = st.session_state["survey"]
     twt = survey.twt
+    st.caption(f"Will stack: **{wf.input_name(chk)}** gathers.")
+    wf.stale_banner(["stack", "rna", "decon_post", "tvf", "migration", "final_scale"])
 
     st.markdown("Fold-normalized stacking sums the live (non-muted) NMO-corrected traces at each "
                  "CDP and divides by the *live* fold at each time sample — not the nominal trace "
                  "count — so a stretch-muted near-time zone isn't diluted by zeroed samples.")
 
-    if st.button("Run stack", type="primary"):
+    if wf.run_button("stack", "Run stack", key="run_stack"):
         with st.spinner("Stacking..."):
-            stack_matrix, fold_matrix, naive_matrix = build_stack_section(
-                gathers, cdp_list, "traces_nmo_final", "nmo_final_live_mask")
-        st.session_state["stack_matrix"] = stack_matrix
-        st.session_state["fold_matrix"] = fold_matrix
-        st.session_state["naive_matrix"] = naive_matrix
-        ss.mark_stage_done("stack", {"n_cdp": len(cdp_list)})
-        st.rerun()
+            wf.execute(stage_ops.run_stack)
 
     if not ss.is_stage_done("stack"):
         return
@@ -42,7 +42,7 @@ def render():
     stack_matrix = st.session_state["stack_matrix"]
     fold_matrix = st.session_state["fold_matrix"]
     naive_matrix = st.session_state["naive_matrix"]
-    st.success("✅ Stack complete.")
+    st.success(f"✅ Stack complete — stacked the {wf.input_name(ss.entry('stack'))} gathers.")
 
     fold_per_cdp = np.array([g["fold"].max() for g in gathers.values()])
     st.plotly_chart(seismic_plots.plot_fold_map(fold_per_cdp, cdp_list), theme=None, key="stacking_view_chart_2001")

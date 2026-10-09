@@ -5,30 +5,22 @@ from __future__ import annotations
 import numpy as np
 import streamlit as st
 
-from modules.attributes import ATTRIBUTE_REGISTRY, ATTRIBUTE_COLORSCALE_MAP
+from modules.attributes import ATTRIBUTE_COLORSCALE_MAP, ATTRIBUTE_REGISTRY
 from modules.interpretation import extract_attribute_along_horizon, interpolate_horizon
 from utils import session_state as ss
 from visualization import interpretation_plots, seismic_plots, theme
 
 
-def _best_available_section():
-    for key, label in [("stack_final", "Final processed section"), ("stack_migrated", "Migrated section"),
-                        ("stack_tvf", "Post-stack (pre-migration)"), ("stack_matrix", "Stack")]:
-        if st.session_state.get(key) is not None:
-            return st.session_state[key], label
-    return None, None
-
-
 def render():
     st.header("🧬 Seismic Attributes")
-    st.caption("Step 5 of the interpretation workflow (report Ch.8.6) — Well Tie → Horizon Picking → "
+    st.caption("Step 5 of the interpretation workflow — Well Tie → Horizon Picking → "
                 "Fault Interpretation → Surface Map (see the **Interpretation** page) → **Attribute "
                 "Analysis**. Standard Hilbert-transform-based instantaneous attributes, computed on "
                 "the processed section.")
 
-    section, section_label = _best_available_section()
+    section, section_label = ss.best_available_section()
     if section is None:
-        st.info("Run at least the Stacking step to get a section to compute attributes on.", icon="ℹ️")
+        st.info("Attributes need a section: run Stacking (or a pre-stack migration) first.", icon="ℹ️")
         return
 
     survey = st.session_state["survey"]
@@ -46,6 +38,9 @@ def render():
     if attr_name in st.session_state["attributes"]:
         values = st.session_state["attributes"][attr_name]
         attr_colorscale = ATTRIBUTE_COLORSCALE_MAP.get(attr_name, theme.ATTRIBUTE_COLORSCALE)
+        st.caption(f"Color scale: **{attr_name}** is displayed with the Petrel-convention scale for "
+                    "this attribute family — see the Interpretation & Attributes section of the "
+                    "README for the full per-attribute color mapping.")
         st.plotly_chart(seismic_plots.plot_amplitude_time_map(
             values, cdp_list, twt, title=attr_name, colorscale=attr_colorscale,
             colorbar_title=attr_name, height=550), theme=None, key="attributes_view_chart_1001")

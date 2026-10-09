@@ -1,19 +1,14 @@
 """
-modules/statics.py — Step 12 of the reference pipeline
+modules/statics.py — Residual Statics
 ==========================================================
 Surface-consistent (shot + receiver) residual statics: cross-correlate
 each 1st-pass-NMO trace against its CDP's fold-normalized pilot trace,
 then solve for per-shot and per-receiver static shifts by least squares.
 
-Ported directly from `Seismic_Processing_CORRECTED.ipynb`
-(`crosscorr_lag`, the shot/receiver least-squares system, and
-`apply_static_shift`). No change to the underlying math.
-
-Documented limitation (carried over from the notebook): field statics
-are not computed here — the SEG-Y headers this pipeline was built
-against have no weathering-velocity / uphole-time information, so there
-is nothing to compute a field static from. Only the data-driven,
-surface-consistent residual is applicable.
+Documented limitation: field statics are not computed here — ordinary
+SEG-Y trace headers carry no weathering-velocity / uphole-time
+information, so there is nothing to compute a field static from. Only
+the data-driven, surface-consistent residual is applicable.
 """
 
 from __future__ import annotations

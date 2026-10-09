@@ -5,11 +5,12 @@ Builds a small, fully synthetic 2D land seismic survey (shots, receivers,
 CDP geometry, dipping-free flat reflectors, ground roll, a point diffractor,
 and ambient noise), written out as a genuine SEG-Y file.
 
-This exists ONLY because no real SEG-Y file was supplied with the source
-notebooks — every processing algorithm the app runs on this data is the
-same real computation it would run on a real survey (nothing about the
-*processing* is faked). The data itself is clearly labeled everywhere in
-the UI as synthetic test data, never presented as a real acquired survey.
+This exists so the app has test data to run on without requiring the
+user to supply their own SEG-Y file — every processing algorithm the
+app runs on this data is the same real computation it would run on a
+real survey (nothing about the *processing* is faked). The data itself
+is clearly labeled everywhere in the UI as synthetic test data, never
+presented as a real acquired survey.
 
 Ground truth (for validating the pipeline end-to-end):
   * 5 flat primary reflectors with increasing velocity with depth
@@ -103,26 +104,29 @@ def _inject_field_noise(raw_data: np.ndarray, receiver_station: np.ndarray, shot
                          dt: float, rng: np.random.Generator, *,
                          dead_stations: set, powerline_stations: set, powerline_freq: float,
                          n_spikes: int, spike_amplitude_mult: float) -> dict:
-    """Injects the realistic field-noise conditions the report's Trace
-    Edit / De-spike / Mute sections are actually written around (Sec 5.7,
-    Figs 5.50-5.56) directly into `raw_data` in place, and returns the
-    ground truth (which stations/traces were corrupted) for QC.
+    """Injects realistic field-noise conditions directly into `raw_data`
+    in place, so the Trace Edit / De-spike / Mute steps have real defects
+    to QC and fix, and returns the ground truth (which stations/traces
+    were corrupted) for QC.
 
     Without conditions like these, a clean synthetic gather gives the
     Trace Edit / De-spike step nothing to actually fix — running it does
     nothing, which is indistinguishable from it being broken. Each
-    condition here mirrors one the report documents explicitly:
-    - **Dead channels** (Fig 5.51): "the channel numbers of dead traces
-      do not change for a specific survey" — so these are fixed receiver
+    condition models a real field-acquisition failure mode:
+    - **Dead channels**: a receiver channel can fail mechanically or
+      electrically for an entire survey, so these are fixed receiver
       stations, dead on every shot that records them, not random
-      per-trace dropouts.
-    - **Powerline harmonic noise** (Fig 5.50): a monofrequency (here 50
-      Hz) sinusoid on a contiguous run of channels — the report notes
-      trace kill is preferred over a notch filter here since a notch
-      "produces amplitude notches in the spectrum which may ultimately
-      cause issues during deconvolution."
-    - **Spike-like noise bursts** (Fig 5.52): isolated, extremely high-
-      amplitude single-sample transients scattered through the dataset.
+      per-trace dropouts — matching how dead channels actually behave
+      in the field.
+    - **Powerline harmonic noise**: a monofrequency (here 50 Hz)
+      sinusoid on a contiguous run of channels, consistent with nearby
+      AC power lines coupling into the cable run. Trace kill is
+      preferred over a notch filter here because a notch filter would
+      put amplitude notches in the spectrum that could cause issues
+      during deconvolution.
+    - **Spike-like noise bursts**: isolated, extremely high-amplitude
+      single-sample transients scattered through the dataset, as from
+      cable strikes or instrument glitches.
     """
     twt = np.arange(raw_data.shape[1]) * dt
     info: dict = {"dead_stations": sorted(dead_stations), "powerline_stations": sorted(powerline_stations),
@@ -185,8 +189,8 @@ def generate_synthetic_survey(
 
     `inject_field_noise=True` adds a small, fixed set of dead channels,
     a contiguous powerline-noise-affected channel range, and scattered
-    high-amplitude spikes (report Sec 5.7) — see `_inject_field_noise` —
-    so the Trace Edit / De-spike / Mute steps have real, documented
+    high-amplitude spikes — see `_inject_field_noise` — so the Trace
+    Edit / De-spike / Mute steps have real, documented
     problems to find and fix rather than a perfectly clean gather.
     Defaults to False (a clean survey) so velocity-analysis and other
     accuracy tests that call this function directly aren't perturbed by

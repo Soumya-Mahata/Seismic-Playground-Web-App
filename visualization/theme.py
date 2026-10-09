@@ -1,11 +1,10 @@
 """
 visualization/theme.py — Shared Plotly Style Tokens
 =======================================================
-Mirrors the visual language of the reference Petrophysics app's
-`plots.py`: forced white plot backgrounds with dark text so scientific
-plots stay legible regardless of whether the surrounding Streamlit app
-is in light or dark mode (a plot that inherits the app's dark background
-loses most colormaps' contrast).
+Forced white plot backgrounds with dark text so scientific plots stay
+legible regardless of whether the surrounding Streamlit app is in light
+or dark mode (a plot that inherits the app's dark background loses most
+colormaps' contrast).
 """
 
 import numpy as np
@@ -31,11 +30,7 @@ COLORBAR = dict(tickfont=dict(color=TEXT_DARK, size=11), title_font=dict(color=T
 
 SEMBLANCE_COLORSCALE = "Jet"          # standard in the geophysics community for coherence panels
 VELOCITY_COLORSCALE = "Turbo"
-ATTRIBUTE_COLORSCALE = "Viridis"      # generic fallback only — every attribute in the registry
-                                       # actually gets its Petrel-matched colorscale from
-                                       # modules.attributes.ATTRIBUTE_COLORSCALE_MAP instead (see
-                                       # views/attributes_view.py); this constant is never used by
-                                       # any attribute currently in the registry
+ATTRIBUTE_COLORSCALE = "Viridis"
 
 # ── "Seismic" colormap ──────────────────────────────────────────────────
 # Plotly has NO built-in colorscale literally named "seismic" (that name
@@ -134,8 +129,9 @@ def equalize_traces(data: np.ndarray, pclip: float = 95.0) -> np.ndarray:
 
 
 def percentile_clip(data: np.ndarray, pclip: float = cfg.PCLIP_DEFAULT) -> float:
-    """Symmetric amplitude-clip value for section display, matching the
-    notebook's own visualization convention (percentile of |amplitude|)."""
+    """Symmetric amplitude-clip value for section display, using a
+    percentile-of-|amplitude| convention so a few outlier spikes don't
+    wash out the rest of the section."""
     finite = data[np.isfinite(data)]
     if finite.size == 0:
         return 1.0

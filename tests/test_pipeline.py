@@ -65,7 +65,8 @@ def test_segy_round_trip(tmp_path):
 def test_nmo_flattens_single_reflector():
     """A trace with one hyperbolic event at a known zero-offset time
     should flatten to that exact time after NMO — this is the specific
-    case that caught the notebook's swapped-argument bug."""
+    case that would catch a swapped time/offset argument regression in
+    the interpolation call."""
     dt, nt, offset, v = 0.002, 1500, 800.0, 2000.0
     t0 = np.arange(nt) * dt
     t0_true = 0.5

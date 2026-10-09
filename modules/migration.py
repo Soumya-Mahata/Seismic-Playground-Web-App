@@ -1,14 +1,13 @@
 """
-modules/migration.py — Steps 21 & 22 of the reference pipeline
+modules/migration.py — Migration
 ==================================================================
 Post-stack (zero-offset / exploding-reflector) Kirchhoff time migration
 and the final display-gain scaling pass.
 
-Ported directly from `Seismic_Processing_CORRECTED.ipynb`
-(`kirchhoff_migration`). No change to the math. Vectorized across time
-per contributing trace (the diffraction travel-time curve is computed
-for all output times at once), so a full section migrates in well under
-a second for a typical small teaching/demo line.
+Vectorized across time per contributing trace (the diffraction
+travel-time curve is computed for all output times at once), so a full
+section migrates in well under a second for a typical small
+teaching/demo line.
 """
 
 from __future__ import annotations
@@ -49,10 +48,10 @@ def prestack_kirchhoff_time_migration(gathers: dict, cdp_list: list, input_key: 
                                        velocity_field_2d: np.ndarray, group_interval: float,
                                        aperture_traces: int, offsets_key: str = "offsets",
                                        cdp_stride: int = 1, progress_cb=None) -> tuple:
-    """Pre-Stack (Kirchhoff) Time Migration — PSTM, report Sec 6.13.3:
-    "preserves all offset information ... standard workflow" — vs. the
-    post-stack `kirchhoff_migration` above, which only ever sees an
-    already-stacked (approximately zero-offset) trace per CDP.
+    """Pre-Stack (Kirchhoff) Time Migration — PSTM. Migrates directly
+    from the offset-preserving pre-stack gathers, unlike the post-stack
+    `kirchhoff_migration` above, which only ever sees an already-stacked
+    (approximately zero-offset) trace per CDP.
 
     Migrates directly from offset-preserving CDP gathers using the
     double-square-root (DSR) prestack traveltime for a diffractor at

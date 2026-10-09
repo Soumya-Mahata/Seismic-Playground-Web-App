@@ -1,8 +1,7 @@
 """
 app.py — Seismic Playground
 ================================
-Single-file entry point, mirroring the architecture of the reference
-Petrophysics app: page modules are imported and called here, all
+Single-file entry point: page modules are imported and called here, all
 persistent state lives in `st.session_state` (via `utils.session_state`),
 and navigation is a sidebar `st.radio` rather than Streamlit's native
 multipage `pages/` folder — deliberately, so a single custom nav control
@@ -21,6 +20,7 @@ import streamlit as st
 import config as cfg
 from modules.pipeline import PIPELINE_STAGES as _pipeline_stages
 from utils import session_state as ss
+from utils import workflow_ui as wf
 from views import (attributes_view, cdp_sort_view, data_management, export_view, home,
                     interpretation_view, migration_view, poststack_view,
                     preprocessing_view, stacking_view, velocity_nmo_view)
@@ -63,13 +63,12 @@ with st.sidebar:
     page = st.radio("Navigate", list(PAGES.keys()), key="active_page", label_visibility="collapsed")
     st.divider()
     st.progress(ss.progress_fraction(),
-                text=f"{len(st.session_state['completed_stages'])}/{len(_pipeline_stages)} stages")
+                text=f"{len(st.session_state['completed_stages'])} of {len(_pipeline_stages)} steps run")
     if st.session_state["survey"] is not None:
         st.caption(f"📂 {st.session_state['survey'].source_name}")
     agc_cfg = st.session_state.get("agc_config")
     if agc_cfg:
-        st.caption(f"🔧 Active AGC: **{agc_cfg['mode'].upper()}**, window={agc_cfg['window']} samples "
-                    f"— used by every step after Amplitude Recovery.")
+        st.caption(f"🔧 AGC applied: **{agc_cfg['mode'].upper()}**, window={agc_cfg['window']} samples.")
     mute_cfg = st.session_state.get("mute_config")
     if mute_cfg:
         st.caption(f"✂️ Active mute: {mute_cfg.get('summary', '')}")
@@ -77,9 +76,11 @@ with st.sidebar:
     if fk_cfg:
         st.caption(f"🌊 Active F-K filter: {fk_cfg.get('mode', '?')} polygon, {fk_cfg.get('source', '')}, "
                     f"coeff={fk_cfg.get('coeff', 0):.3f}")
+    with st.expander("Workflow status"):
+        wf.sidebar_status()
     if st.session_state["history"]:
-        with st.expander("Processing history"):
-            for h in st.session_state["history"]:
-                st.caption(f"✓ {h.label}")
+        with st.expander("Processing history (execution order)"):
+            for h in sorted(st.session_state["history"], key=lambda e: e.seq):
+                st.caption(f"{h.seq}. {h.label}")
 
 PAGES[page]()

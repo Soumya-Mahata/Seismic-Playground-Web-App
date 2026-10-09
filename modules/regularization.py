@@ -1,11 +1,10 @@
 """
 modules/regularization.py — Data Regularisation
 ====================================================================
-Implements the report's Sec 6.11 "Data Regularisation" step: transform
-irregularly sampled seismic data onto a regular grid, which is a
-prerequisite for reliable subsequent velocity analysis, stacking, and
-migration ("A regular grid is a prerequisite for many processing steps,
-particularly stacking, migration, and attribute analysis").
+Transforms irregularly sampled seismic data onto a regular offset grid.
+A regular grid is a prerequisite for reliable subsequent velocity
+analysis, stacking, migration, and attribute analysis — all of which
+assume (or work best with) consistent offset sampling across CDPs.
 
 Here, the irregularity being fixed is in the OFFSET dimension within
 each CDP gather: real fold is rarely a clean, evenly spaced set of

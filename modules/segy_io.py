@@ -3,24 +3,23 @@ modules/segy_io.py — SEG-Y I/O, Header Inspection, CDP Gather Construction
 ============================================================================
 Pure Python / NumPy / segyio. No Streamlit dependency.
 
-This is the "single source of truth for dt / ns / record length" step from
-`Seismic_Processing_CORRECTED.ipynb` (cell 3), plus the CDP-gather builder
-from cell 5 (`make_cdp_gathers`), reimplemented on top of `segyio` instead
-of `obspy` + `segyio` together.
+This is the "single source of truth for dt / ns / record length" step,
+plus the CDP-gather builder (`make_cdp_gathers`), implemented on top of
+`segyio` instead of `obspy` + `segyio` together.
 
 Library note (documented assumption)
 -------------------------------------
-The reference notebooks use `obspy.read()` to pull trace samples into a
-NumPy array and `segyio` for named-field header access. `segyio` alone can
-do both (trace data via `f.trace.raw[:]`, headers via `f.attributes(...)`)
-and can also *write* SEG-Y, which `obspy`'s SEG-Y writer does not support
-as robustly for arbitrary custom headers. Dropping the `obspy` dependency
-keeps the app's dependency footprint smaller without changing any of the
-notebook's actual processing logic — only how trace samples and header
-words are pulled out of the file.
+Pulling trace samples into a NumPy array and doing named-field header
+access can both be done with `segyio` alone (trace data via
+`f.trace.raw[:]`, headers via `f.attributes(...)`), and `segyio` can also
+*write* SEG-Y, which `obspy`'s SEG-Y writer does not support as robustly
+for arbitrary custom headers. Dropping the `obspy` dependency keeps the
+app's dependency footprint smaller without changing any of the
+processing logic — only how trace samples and header words are pulled
+out of the file.
 
 A SEG-Y file can be read in one of two geometry modes here:
-  * `ignore_geometry=True` (default, matches the notebook) — every trace is
+  * `ignore_geometry=True` (default) — every trace is
     read in file order; CDP/offset/shot come from trace headers. Works for
     any 2D line regardless of whether the file declares a regular 3D grid.
 """
@@ -98,7 +97,7 @@ def materialize_upload(uploaded_file) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 1) READ SEG-Y  (mirrors notebook cell 3: single source of truth for
+# 1) READ SEG-Y  (single source of truth for
 #    dt / ns / record length, plus shot & receiver identifiers)
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -134,7 +133,7 @@ def read_segy(path: str, source_name: Optional[str] = None) -> SeismicSurvey:
         text_bytes = f.text[0]
         binary_header = {str(k): int(v) for k, v in dict(f.bin).items()}
 
-    # Group interval: notebook uses the difference between the first two
+    # Group interval: estimated from the difference between the first two
     # stored offsets. Robust fallback: median absolute step between unique
     # GroupX positions, used only if the primary estimate is degenerate
     # (zero or NaN — e.g. offset field left blank in the file).
@@ -184,7 +183,7 @@ def _decode_text_header(text_bytes: bytes) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# TRACE HEADER SCAN (QC table) — mirrors Final_task.ipynb's scan_headers()
+# TRACE HEADER SCAN (QC table)
 # ─────────────────────────────────────────────────────────────────────────
 
 def scan_trace_headers(survey: SeismicSurvey, n: Optional[int] = None) -> pd.DataFrame:
@@ -229,7 +228,7 @@ def header_qc_summary(survey: SeismicSurvey) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 2) BUILD CDP GATHERS  (mirrors notebook cell 5: make_cdp_gathers)
+# 2) BUILD CDP GATHERS  (make_cdp_gathers)
 # ─────────────────────────────────────────────────────────────────────────
 
 def build_cdp_gathers(survey: SeismicSurvey, n_min_traces: int = 10, sort_by: str = "offset",
@@ -333,8 +332,7 @@ def scatter_to_flat(gathers: dict, trace_key: str, num_traces: int, num_samples:
 
 
 def demux_check(raw_data: np.ndarray, num_traces: int, num_samples: int) -> tuple:
-    """Confirm (traces, samples) orientation; transpose if it looks swapped.
-    Mirrors the demultiplexing sanity check in Final_task.ipynb."""
+    """Confirm (traces, samples) orientation; transpose if it looks swapped."""
     if raw_data.shape == (num_traces, num_samples):
         return raw_data, "Data already demultiplexed (traces, samples)."
     if raw_data.shape == (num_samples, num_traces):

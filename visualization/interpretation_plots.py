@@ -45,7 +45,7 @@ def plot_section_with_picks(section: np.ndarray, cdp_list: Sequence[int], twt: n
 def plot_structure_profile(values: np.ndarray, cdp_list: Sequence[int], *, y_title: str = "TWT (s)",
                             title: str = "", invert_y: bool = True, color: str = "#0D2B5E") -> go.Figure:
     """A time/depth structure "profile" along CDP — the 2D-line analogue
-    of an areal time/depth structure map (report Sec 8.5): this app only
+    of an areal time/depth structure map: this app only
     ever works with a single 2D line, so there is no areal grid to
     contour, but the same quantity (a picked/converted horizon's
     time-or-depth value at every CDP) is shown as a continuous profile,
@@ -61,9 +61,10 @@ def plot_structure_profile(values: np.ndarray, cdp_list: Sequence[int], *, y_tit
 
 def plot_attribute_along_horizon(values: np.ndarray, cdp_list: Sequence[int], *,
                                   title: str = "Attribute Along Horizon", colorbar_title: str = "Value",
-                                  colorscale: str = None, height: int = 320) -> go.Figure:
+                                  height: int = 320, colorscale: str = None) -> go.Figure:
     fig = go.Figure(go.Scatter(x=list(cdp_list), y=values, mode="lines+markers",
-                                marker=dict(size=5, color=values, colorscale=colorscale or theme.ATTRIBUTE_COLORSCALE,
+                                marker=dict(size=5, color=values,
+                                            colorscale=colorscale or theme.ATTRIBUTE_COLORSCALE,
                                             colorbar=dict(title=colorbar_title, **theme.COLORBAR)),
                                 line=dict(color="rgba(100,100,100,0.4)")))
     fig.update_layout(**theme.base_layout(title, height))

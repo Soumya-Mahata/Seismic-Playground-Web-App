@@ -1,15 +1,11 @@
 """
-modules/nmo.py — Steps 11, 13, 14, 16 of the reference pipeline
+modules/nmo.py — Normal Moveout, Inverse NMO, and DMO
 ===================================================================
 Normal moveout (NMO) correction, its inverse, and the simplified DMO
 approximation.
 
-Contains one deliberate, documented correction relative to the literal
-source notebook, affecting two functions — see "Bug found and fixed"
-below.
-
-Bug found and fixed (relative to Seismic_Processing_CORRECTED.ipynb)
-------------------------------------------------------------------
+Interpolation convention for forward NMO and its true inverse
+---------------------------------------------------------------
 For each trace at offset x, the recorded two-way time at zero-offset
 time t0 is tn(t0) = sqrt(t0^2 + x^2/vrms(t0)^2). Forward NMO maps the
 *recorded* amplitude at tn back to t0: out(t0) = recorded(tn(t0)). Since
@@ -17,46 +13,43 @@ a trace is only known at its own sample grid, this means building an
 interpolant from (t0_grid, trace_values) pairs and evaluating it at the
 query points tn — `np.interp(tn, t0_grid, trace)`.
 
-The source notebook's `nmo_correction` instead calls
-`np.interp(t0[valid], tn[valid], traces[ix, valid])` — query and
-reference-grid arguments swapped. Verified empirically on a synthetic
-trace with a single reflection event at a known time: the notebook's
-exact formula places the corrected event at the wrong output time
-(mapped a reflector that should flatten to t0=0.500 s to t=0.754 s
-instead), while `np.interp(tn, t0_grid, trace)` recovers 0.500 s exactly.
+It's worth spelling this out carefully because the opposite convention —
+`np.interp(t0, tn, trace)`, with the query and reference-grid arguments
+swapped — looks superficially similar but is subtly wrong: verified
+empirically on a synthetic trace with a single reflection event at a
+known time, that swapped formula places the corrected event at the wrong
+output time (mapped a reflector that should flatten to t0=0.500 s to
+t=0.754 s instead), while `np.interp(tn, t0_grid, trace)` recovers
+0.500 s exactly.
 
-The natural next question — since two functions in this file are meant
-to be exact inverses of each other — is whether `inverse_nmo_correction`
-was affected too. A direct round-trip test (apply forward NMO, then
-inverse NMO, and check the original trace comes back) shows it was:
-the notebook's `inverse_nmo_correction` uses the *same* query/reference
-convention as the (corrected) forward `nmo_correction` above
-(`np.interp(tn, t0_grid, trace)`), which is self-consistent for forward
-warping but is **not** actually the inverse of it — applying it after a
-forward NMO pass compounds the same warp a second time rather than
-undoing it (confirmed numerically: round-tripping a spike through both
-functions as originally written moves it further from its start, not
-back to it).
+The companion question — since `nmo_correction` and
+`inverse_nmo_correction` are meant to be exact inverses of each other —
+is what convention the inverse actually needs. A direct round-trip test
+(apply forward NMO, then inverse NMO, and check the original trace comes
+back) shows that reusing the *same* query/reference convention as the
+forward function (`np.interp(tn, t0_grid, trace)`) is self-consistent
+for forward warping but is **not** actually the inverse of it — applying
+it after a forward NMO pass compounds the same warp a second time rather
+than undoing it (confirmed numerically: round-tripping a spike through
+both functions with matching conventions moves it further from its
+start, not back to it).
 
 The actual inverse of `out[k] = interp(tn[k], t0_grid, v)` is
-`out[k] = interp(t0[k], tn_grid, v)` — i.e. exactly the swapped
-convention the notebook's (buggy) `nmo_correction` happened to use. In
-other words: the notebook's two NMO functions each implement the
-*other* one's stated purpose. `nmo_correction` here uses the forward
-convention; `inverse_nmo_correction` here uses the swapped convention —
-verified with a direct round-trip test
+`out[k] = interp(t0[k], tn_grid, v)` — i.e. the swapped convention.
+`nmo_correction` here uses the forward convention;
+`inverse_nmo_correction` here uses the swapped convention — verified
+with a direct round-trip test
 (`tests/test_pipeline.py::test_inverse_nmo_undoes_nmo`) that recovers an
 original trace's spikes to within one sample after forward-then-inverse
-NMO. `dmo_correction` is left unchanged: it doesn't claim to be an
-inverse of anything, and consistently uses the same forward-style
+NMO. `dmo_correction` is unrelated to this and doesn't claim to be an
+inverse of anything — it consistently uses the same forward-style
 convention to add stretch on top of already-flat data, which is
 self-consistent with what it's meant to do.
 
-Because `nmo_correction` is called at both NMO passes (steps 11 and 16)
-and `inverse_nmo_correction` feeds directly into the 2nd-pass velocity
-analysis (step 15), both bugs would otherwise propagate through most of
-the rest of the pipeline. Documented in README.md under "Deviations from
-the notebook".
+Because `nmo_correction` is called at both NMO passes and
+`inverse_nmo_correction` feeds directly into the 2nd-pass velocity
+analysis, getting this convention right at every call site matters for
+the accuracy of the rest of the pipeline downstream of it.
 """
 
 from __future__ import annotations
@@ -69,8 +62,8 @@ import numpy as np
 def nmo_correction(traces: np.ndarray, offsets: np.ndarray, vrms: np.ndarray,
                     dt: float, stretch_mute: float = 0.30) -> Tuple[np.ndarray, np.ndarray]:
     """Forward NMO: flattens a moveout-containing gather to zero-offset
-    time t0. See module docstring for the formula and the fix relative
-    to the source notebook.
+    time t0. See module docstring for the formula and interpolation
+    convention.
 
     Returns (corrected_traces, live_mask) — `live_mask` marks samples
     kept after the stretch mute (NMO stretch = (tn-t0)/t0 exceeding
@@ -98,8 +91,7 @@ def inverse_nmo_correction(nmo_traces: np.ndarray, offsets: np.ndarray,
     """Exact inverse of `nmo_correction`: re-introduces the moveout that
     a forward NMO pass with the same offsets/velocities would remove.
     See module docstring — this uses the swapped interpolation
-    convention relative to the source notebook's `inverse_nmo_correction`,
-    which is required for it to be an actual inverse of (the corrected)
+    convention, which is required for it to be an actual inverse of
     `nmo_correction` rather than a repeat of the same forward warp."""
     ntr, nt = nmo_traces.shape
     t0 = np.arange(nt) * dt
@@ -115,17 +107,18 @@ def dmo_correction(nmo_traces: np.ndarray, offsets: np.ndarray,
                     vrms: np.ndarray, dt: float) -> np.ndarray:
     """Simplified single-gather time-stretch DMO approximation.
 
-    Documented limitation (carried over from the notebook): this is a
-    time-stretch stand-in for true dip-moveout, not a full common-offset
-    log-stretch/Kirchhoff DMO operator. It corrects for the leading-order
-    time shift DMO introduces but does not perform a proper spatial
-    (common-offset-domain) energy redistribution across CDPs. A full DMO
-    operator is noted as future work (see README "Known limitations").
+    Documented limitation: this is a time-stretch stand-in for true
+    dip-moveout, not a full common-offset log-stretch/Kirchhoff DMO
+    operator. It corrects for the leading-order time shift DMO
+    introduces but does not perform a proper spatial (common-offset-
+    domain) energy redistribution across CDPs. A full DMO operator is
+    noted as future work (see README "Known limitations").
 
     Uses the same forward-style interpolation convention as
     `nmo_correction` (adds stretch on top of already-NMO'd data), which
-    is self-consistent with its purpose and was not affected by the fix
-    above — it never claimed to invert anything."""
+    is self-consistent with its purpose — it never claims to invert
+    anything, so the swapped convention used by `inverse_nmo_correction`
+    doesn't apply here."""
     ntr, nt = nmo_traces.shape
     t = np.arange(nt) * dt
     out = np.zeros_like(nmo_traces)

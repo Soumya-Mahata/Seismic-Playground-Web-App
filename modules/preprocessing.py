@@ -1,15 +1,12 @@
 """
-modules/preprocessing.py — Steps 4, 5, 7, 8 of the reference pipeline
+modules/preprocessing.py — Amplitude Recovery, Deconvolution, Balancing, Mute
 ========================================================================
 Amplitude recovery (AGC), spiking deconvolution before stack, trace
 balancing (scalar normalization), and top mute.
 
-Ported directly from `Seismic_Processing_CORRECTED.ipynb` (functions
-`agc`, `spiking_decon_single_trace`, `spiking_decon_gather`,
-`trace_normalize`, `apply_top_bottom_mute`) with no change to the
-underlying math — only reshaped to take explicit array arguments instead
-of closing over notebook-global `gathers` dicts, so each step is a pure,
-independently-testable, cacheable function.
+Each function takes explicit array arguments (rather than closing over a
+shared `gathers` dict) so each step is a pure, independently-testable,
+cacheable function.
 """
 
 from __future__ import annotations
@@ -27,8 +24,8 @@ from scipy.signal import correlate, lfilter
 def agc(data: np.ndarray, window: int, mode: str = "rms") -> np.ndarray:
     """Automatic gain control along the time axis (axis=1).
 
-    mode: "rms" (sliding RMS, self-normalizing — the notebook's chosen
-    amplitude-recovery method after finding that raw t^2 spherical-
+    mode: "rms" (sliding RMS, self-normalizing — the preferred
+    amplitude-recovery method, since raw t^2 spherical-
     divergence gain over-amplifies the late-time noise floor), "mean",
     or "median".
     """
@@ -47,18 +44,18 @@ def agc(data: np.ndarray, window: int, mode: str = "rms") -> np.ndarray:
 
 def tp_gain(data: np.ndarray, twt: np.ndarray, power: float = 2.0) -> np.ndarray:
     """t^power spherical-divergence-correction gain (comparison only —
-    the notebook found this over-amplifies the late-time noise floor on
-    a full 3 s record and uses AGC for the actual amplitude-recovery
-    step instead)."""
+    this over-amplifies the late-time noise floor on a full 3 s record,
+    which is why AGC is used for the actual amplitude-recovery step
+    instead)."""
     curve = twt ** power
     return data * curve[np.newaxis, :]
 
 
 def late_time_noise_ratio(raw: np.ndarray, gained: np.ndarray, dt: float, late_time_s: float = 2.0) -> float:
     """Quantifies how much a gain method inflates the noise floor after
-    `late_time_s` — this is the exact diagnostic the notebook used to
-    catch the t^2-gain bug (compare single-trace amplitude at each
-    stage, not the final stack's appearance)."""
+    `late_time_s` — a useful diagnostic for catching over-amplification
+    from a t^2-type gain (compare single-trace amplitude at each stage,
+    not the final stack's appearance)."""
     idx = int(late_time_s / dt)
     num = np.abs(gained[:, idx:]).mean()
     den = np.abs(raw[:, idx:]).mean() + 1e-15
@@ -129,11 +126,10 @@ def flag_bad_traces(data: np.ndarray, dead_frac: float = 0.02, noisy_mult: float
     perfectly healthy — ends up at very nearly the same RMS level by
     construction. Confirmed empirically: a channel that is 1000x weaker
     than its neighbors before AGC becomes indistinguishable from them
-    afterward, so this function would silently flag nothing. This is
-    exactly the report's own warning in Sec 5.6.3 that AGC "completely
-    removes relative amplitude information embedded in the seismic
-    data" — that applies just as much to a QC step that depends on
-    relative amplitude as it does to AVO/inversion.
+    afterward, so this function would silently flag nothing. AGC
+    completely removes the relative amplitude information embedded in
+    the seismic data — that applies just as much to a QC step that
+    depends on relative amplitude as it does to AVO/inversion.
 
     Returns a dict of boolean masks and the underlying energy values so
     a QC view can show exactly why each trace was flagged, rather than
@@ -237,7 +233,7 @@ def spiking_decon_single_trace(trace: np.ndarray, operator_length: int = 30,
     """Spiking deconvolution — predictive deconvolution with a
     prediction lag of exactly one sample (see
     `predictive_decon_single_trace`). Kept as a named, explicit special
-    case since it's the notebook's original (unmodified) algorithm."""
+    case of the general predictive-deconvolution operator."""
     return predictive_decon_single_trace(trace, operator_length, prediction_lag=1, pre_whitening=pre_whitening)
 
 
@@ -258,7 +254,7 @@ def trace_normalize(data: np.ndarray, ref_window: slice | None = None) -> np.nda
     """Divide each trace by a single RMS scalar (optionally computed over
     a reference time window), preserving relative amplitude within the
     trace. Distinct from the sliding-window AGC used for amplitude
-    recovery — this is the reference material's separate "Balance" step."""
+    recovery — this is a separate "Balance" step."""
     data = np.asarray(data, dtype=float)
     seg = data if ref_window is None else data[:, ref_window]
     scalar = np.sqrt(np.mean(seg ** 2, axis=1, keepdims=True))
@@ -301,13 +297,12 @@ def apply_linear_mute(data: np.ndarray, offsets: np.ndarray, dt: float, velocity
 
     This is the correct mute geometry for removing a direct arrival or
     ground-roll cone, whose arrival time increases roughly linearly with
-    offset (report Sec 5.2.2 "the direct wave", Sec 5.11 "ground roll").
-    A single global top-mute time (`apply_top_bottom_mute`) cannot follow
-    that moveout at all — it either mutes too little at far offsets (the
-    cone is still there) or too much at near offsets (killing real
-    shallow reflections), which is exactly the bug this fixes: the old
-    mute step used a flat cutoff regardless of offset and so visibly
-    never touched the diagonal noise trend in a full shot gather.
+    offset. A single global top-mute time (`apply_top_bottom_mute`)
+    cannot follow that moveout at all — it either mutes too little at
+    far offsets (the cone is still there) or too much at near offsets
+    (killing real shallow reflections). A flat cutoff regardless of
+    offset cannot follow the diagonal noise trend visible in a full shot
+    gather, which is exactly why an offset-dependent mute is needed.
 
     Returns (muted_data, mute_times) where `mute_times` is one cutoff
     time per trace, for QC overlay on the section display.
@@ -332,14 +327,14 @@ def apply_linear_mute(data: np.ndarray, offsets: np.ndarray, dt: float, velocity
 def apply_surgical_mute(data: np.ndarray, offsets: np.ndarray, dt: float, *,
                          t_min: float, t_max: float, x_min: float, x_max: float,
                          taper_s: float = 0.02) -> np.ndarray:
-    """Surgical mute (report Sec 5.8, Fig 5.57B/5.60): zeroes a specific
-    rectangular (offset, time) region of noise *inside* the gather —
-    unlike a top mute, this does not need to start from t=0, and unlike
-    trace kill it does not need to remove a whole trace. The report's
-    own example (Fig 5.60) is exactly this: "distinctive high-frequency
-    harmonic noise in a triangular zone along the near offset channels"
-    that "is not easy to remove ... using conventional processing
-    methodology", handled with a surgical mute rather than a filter.
+    """Surgical mute: zeroes a specific rectangular (offset, time)
+    region of noise *inside* the gather — unlike a top mute, this does
+    not need to start from t=0, and unlike trace kill it does not need
+    to remove a whole trace. This is useful for noise such as
+    distinctive high-frequency harmonic noise confined to a triangular
+    zone along the near-offset channels, which is not easy to remove
+    using conventional filtering, and is better handled with a surgical
+    mute instead.
 
     Traces with |offset| in [x_min, x_max] are zeroed for time in
     [t_min, t_max], with a cosine taper of `taper_s` seconds on both the
@@ -365,5 +360,5 @@ def apply_surgical_mute(data: np.ndarray, offsets: np.ndarray, dt: float, *,
 def mute_mask(ns: int, dt: float, t_top: float = 0.05, t_bottom: float | None = None,
               taper_s: float = 0.05) -> np.ndarray:
     """Return the 1-D mute mask itself (used to re-apply the same mute to
-    a section after migration, as the reference pipeline does in step 22)."""
+    a section after migration)."""
     return apply_top_bottom_mute(np.ones((1, ns)), dt, t_top, t_bottom, taper_s)[0]

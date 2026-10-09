@@ -14,12 +14,14 @@ from utils.formatting import human_bytes
 from visualization import controls, seismic_plots
 
 
-def _best_available_section():
-    for key, label in [("stack_final", "final"), ("stack_migrated", "migrated"),
-                        ("stack_tvf", "poststack"), ("stack_matrix", "stack")]:
-        if st.session_state.get(key) is not None:
-            return st.session_state[key], label
-    return None, None
+_TAGS = {"Final processed section": "final", "Migrated section": "migrated",
+         "Stack": "stack"}
+
+
+def _section_tag(label: str) -> str:
+    if label in _TAGS:
+        return _TAGS[label]
+    return "poststack"          # any post-stack chain head (RNA / decon / TVF)
 
 
 def render():
@@ -31,16 +33,17 @@ def render():
     cdp_list = st.session_state["cdp_list"]
     twt = survey.twt
 
-    section, section_tag = _best_available_section()
+    section, section_label = ss.best_available_section()
+    section_tag = _section_tag(section_label) if section_label else None
 
     tab_section, tab_picks, tab_attr, tab_report = st.tabs(
         ["Processed Section", "Horizons & Faults", "Attributes", "Processing Report"])
 
     with tab_section:
         if section is None:
-            st.info("Run at least the Stacking step to export a processed section.", icon="ℹ️")
+            st.info("Run Stacking (or a pre-stack migration) to have a section to export.", icon="ℹ️")
         else:
-            st.caption(f"Exporting the most advanced available section: **{section_tag}**.")
+            st.caption(f"Exporting the most advanced available section: **{section_label}**.")
             base_name = f"{survey.source_name.rsplit('.', 1)[0]}_{section_tag}"
             col1, col2, col3 = st.columns(3)
             with col1:

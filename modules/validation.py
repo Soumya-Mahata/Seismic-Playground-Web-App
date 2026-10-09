@@ -20,6 +20,22 @@ class ValidationError(Exception):
     clear, friendly message rather than an unhandled traceback."""
 
 
+class DependencyError(ValidationError):
+    """A *genuine* computational prerequisite is missing (the ⛔ case).
+
+    Distinct from a recommendation (the ⚠ case): a recommended-but-skipped
+    step never raises — only the absence of an input the computation
+    cannot run without does. Subclasses `ValidationError`, so the views'
+    existing `except ValidationError` handlers show it as a friendly
+    message. `stage_id` and `missing` let callers/tests inspect what was
+    missing without parsing the message."""
+
+    def __init__(self, message: str, stage_id: str = "", missing: Optional[list] = None):
+        super().__init__(message)
+        self.stage_id = stage_id
+        self.missing = list(missing or [])
+
+
 ALLOWED_SEGY_EXTENSIONS = {".sgy", ".segy", ".su"}
 
 
@@ -70,6 +86,46 @@ def validate_frequency_band(fmin: float, fmax: float, nyquist: float) -> None:
             f"High-cut frequency ({fmax} Hz) must be below the Nyquist frequency "
             f"({nyquist:.1f} Hz implied by this data's sample interval)."
         )
+
+
+def require_gather_key(gathers: Optional[dict], key: str, what: str, stage_name: str = "") -> None:
+    """Data-level guard: every gather in `gathers` must carry `key`.
+
+    The dependency engine (`modules/dependencies.py`) is the first line of
+    defence — it stops a stage whose inputs were never produced. This is
+    the second line, for a state the engine's records and the actual data
+    disagree on (or a caller that bypasses the engine and calls the maths
+    directly): fail with a sentence a person can act on rather than a bare
+    `KeyError: 'vrms_field_vel1'`."""
+    prefix = f"{stage_name}: " if stage_name else ""
+    if not gathers:
+        raise DependencyError(f"{prefix}there are no gathers to work on yet — {what} is missing.",
+                              stage_id=stage_name, missing=[what])
+    missing = [g_id for g_id, g in gathers.items() if key not in g]
+    if missing:
+        raise DependencyError(
+            f"{prefix}{what} is missing from {len(missing)} of {len(gathers)} gathers "
+            f"(first: {missing[0]}). Run the step that produces it first.",
+            stage_id=stage_name, missing=[what])
+
+
+def validate_velocity_field(vfield: Optional[np.ndarray], num_samples: int, num_cdp: int,
+                            what: str = "velocity field") -> None:
+    """A velocity field consumed by NMO / migration must be a finite,
+    strictly positive (n_samples, n_cdp) array — migration divides by it,
+    so a zero or NaN here would silently poison the whole image."""
+    if vfield is None:
+        raise DependencyError(f"No {what} is available — run a velocity analysis first.",
+                              missing=[what])
+    arr = np.asarray(vfield)
+    if arr.shape != (num_samples, num_cdp):
+        raise DependencyError(
+            f"The {what} has shape {arr.shape}, but the current data needs "
+            f"({num_samples} samples, {num_cdp} CDPs). It was probably built from different CDP "
+            f"gathers — re-run the velocity analysis.", missing=[what])
+    if not np.all(np.isfinite(arr)) or np.any(arr <= 0):
+        raise ValidationError(f"The {what} contains zero, negative or non-finite velocities, "
+                              f"which cannot be used for NMO or migration.")
 
 
 def check_finite(data: np.ndarray, stage_name: str) -> Optional[str]:

@@ -1,17 +1,16 @@
 """
 modules/interpretation.py — Horizon/Fault Picking & Well Tie
 ================================================================
-Not present in the source notebooks (processing-only, ending at
-migration), but explicitly supported by the interpretation reference PDF
-(horizon/fault correlation, synthetic seismograms, wavelet extraction are
-all covered there) and requested in the task brief. Implemented as
-honest, standard, clearly-scoped features operating on the app's own
-processed section — nothing here is faked or pre-filled.
+This goes beyond pure processing (which ends at migration) into
+interpretation — horizon/fault correlation, synthetic seismograms, and
+wavelet extraction. Implemented as honest, standard, clearly-scoped
+features operating on the app's own processed section — nothing here is
+faked or pre-filled.
 
 Horizon and fault picking is *manual* (the person clicks/enters points on
-the section); there is no automatic horizon tracker, because the source
-material gives no basis for one and a fabricated auto-tracker would risk
-presenting invented picks as real interpretation.
+the section); there is no automatic horizon tracker, because a
+fabricated auto-tracker would risk presenting invented picks as real
+interpretation.
 
 The well-tie / synthetic-seismogram module is a genuine, standard
 implementation (reflectivity -> wavelet convolution -> correlation) but
@@ -174,13 +173,12 @@ def depth_to_time(depth_m: np.ndarray, vp_m_s: np.ndarray,
 def extract_statistical_wavelet(traces: np.ndarray, dt: float, length_s: float = 0.15,
                                  t_window: Optional[Tuple[float, float]] = None) -> np.ndarray:
     """Statistical (zero-phase) wavelet extraction directly from seismic
-    traces, for use in the well-to-seismic tie — report Sec 8.2.1.1,
-    Step 3: "extracted statistically from the seismic data ... in a
-    window around the well".
+    traces, for use in the well-to-seismic tie: extracted statistically
+    from the seismic data in a window around the well.
 
     Method: the same white-reflectivity assumption underlying spiking
-    deconvolution (report Sec 6.8.2 — "the autocorrelation of the
-    seismogram approximates the autocorrelation of the wavelet") means
+    deconvolution (the autocorrelation of the seismogram approximates
+    the autocorrelation of the wavelet) means
     the ensemble-averaged POWER spectrum of a group of traces around the
     well approximates the wavelet's power spectrum. Taking the square
     root gives the wavelet's amplitude spectrum; assuming zero phase
@@ -224,9 +222,9 @@ def extract_statistical_wavelet(traces: np.ndarray, dt: float, length_s: float =
 
 def well_tie_correlation(synthetic: np.ndarray, seismic: np.ndarray) -> float:
     """Zero-lag correlation coefficient between the (normalized) synthetic
-    and real seismic trace over their common length — report Sec 8.2.1.1
-    Step 4 "Matching": values above ~0.7-0.8 are generally considered a
-    good tie, though the threshold is data- and zone-dependent."""
+    and real seismic trace over their common length — values above
+    ~0.7-0.8 are generally considered a good tie, though the threshold
+    is data- and zone-dependent."""
     n = min(len(synthetic), len(seismic))
     s, x = synthetic[:n], seismic[:n]
     denom = np.sqrt(np.sum(s ** 2) * np.sum(x ** 2))
@@ -255,8 +253,8 @@ def read_las_curves(file_obj) -> dict:
 def sonic_to_velocity(dt_log: np.ndarray, unit: str) -> np.ndarray:
     """Converts a sonic (interval transit time) log to P-wave velocity.
     `unit` is one of "us_per_ft" or "us_per_m" (microseconds per unit
-    length) — report Eq. 7.5, Vp = 1 / delta-t, expressed per the log's
-    native unit before converting to m/s."""
+    length). Vp = 1 / delta-t, expressed per the log's native unit
+    before converting to m/s."""
     dt_log = np.asarray(dt_log, dtype=float)
     safe = np.where(np.abs(dt_log) < 1e-6, np.nan, dt_log)
     if unit == "us_per_ft":

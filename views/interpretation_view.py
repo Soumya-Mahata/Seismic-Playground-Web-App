@@ -1,9 +1,8 @@
 """
 views/interpretation_view.py — Well Tie, Horizon/Fault Picking, Surface Map
 ====================================================================
-Implements the interpretation workflow in the order the summer report
-lays it out (Ch.8): (1) Well-to-Seismic Tie -> (2) Seismic Horizon
-Picking -> (3) Fault Interpretation -> (4) Surface (Time/Depth) Map
+Implements the interpretation workflow: (1) Well-to-Seismic Tie
+-> (2) Seismic Horizon Picking -> (3) Fault Interpretation -> (4) Surface (Time/Depth) Map
 Generation. Step (5), Seismic Attribute Analysis, is its own page
 (Attributes) since it operates on the finished interpretation.
 
@@ -37,14 +36,6 @@ _HORIZON_COLORS = ["#facc15", "#22d3ee", "#a78bfa", "#f472b6", "#34d399"]
 _FAULT_COLORS = ["#ef4444", "#f97316", "#dc2626"]
 
 
-def _best_available_section():
-    for key, label in [("stack_final", "Final processed section"), ("stack_migrated", "Migrated section"),
-                        ("stack_tvf", "Post-stack (pre-migration)"), ("stack_matrix", "Stack")]:
-        if st.session_state.get(key) is not None:
-            return st.session_state[key], label
-    return None, None
-
-
 def _nearest_cdp(cdp_list, x_clicked: float) -> int:
     arr = np.asarray(cdp_list)
     return int(arr[np.argmin(np.abs(arr - x_clicked))])
@@ -59,14 +50,15 @@ def _step_caption(current: int):
 
 def render():
     st.header("🧭 Interpretation")
-    st.caption("Well-to-seismic tie, horizon and fault picking, and surface map generation — "
-                "in the order the report lays them out (Ch.8).")
+    st.caption("Well-to-seismic tie, horizon and fault picking, and surface map generation.")
 
-    if not ss.require_stage("cdp_sort"):
-        return
-    section, section_label = _best_available_section()
+    # Needs *a* section — the most advanced valid one (final > migrated > post-stack chain head
+    # > stack). Pre-stack migration yields a migrated section without a stack, so "stacking has
+    # been run" is not what is required, only that a section exists.
+    section, section_label = ss.best_available_section()
     if section is None:
-        st.info("Run at least the Stacking step to get a section to interpret.", icon="ℹ️")
+        st.info("Interpretation needs a section: run Stacking (then optionally post-stack "
+                 "processing, migration and final scaling), or a pre-stack migration.", icon="ℹ️")
         return
 
     survey = st.session_state["survey"]
@@ -88,7 +80,7 @@ def render():
             "file (curve names vary between wells/vendors, so LAS curves are mapped explicitly "
             "below rather than assumed). A checkshot CSV (`depth_m`, `twt_s`) is optional — without "
             "one, depth-to-time comes from integrating the sonic/velocity log directly, the standard "
-            "fallback (report Sec 8.2.1.1, Step 2)."
+            "fallback."
         )
         log_file = st.file_uploader("Well log", type=["csv", "las"], key="welllog_file")
         checkshot_file = st.file_uploader("Checkshot CSV (optional)", type=["csv"], key="checkshot_csv")
@@ -167,7 +159,7 @@ def render():
             st.markdown(
                 "Extracts a zero-phase wavelet directly from a window of the seismic section around "
                 "the tie CDP, using the same white-reflectivity assumption that underlies statistical "
-                "deconvolution (report Sec 6.8.2/8.2.1.1): the ensemble-averaged power spectrum of "
+                "deconvolution: the ensemble-averaged power spectrum of "
                 "nearby traces approximates the wavelet's own power spectrum."
             )
             c1, c2, c3 = st.columns(3)
@@ -230,7 +222,7 @@ def render():
             fig.update_yaxes(**theme.time_axis())
             st.plotly_chart(fig, theme=None, key="tie_chart")
             badge = "✅ good tie" if corr >= 0.7 else ("⚠️ marginal" if corr >= 0.4 else "❌ poor tie")
-            st.metric("Correlation coefficient (report Sec 8.2.1.1, Step 4)", f"{corr:.2f}", badge)
+            st.metric("Correlation coefficient", f"{corr:.2f}", badge)
             st.caption("Adjust the manual bulk shift above until the strongest synthetic events line "
                         "up with the strongest seismic events and the correlation coefficient is "
                         "maximized (≳0.7-0.8 is generally considered a good tie).")
@@ -292,9 +284,9 @@ def render():
                 with st.expander("Horizon curvature"):
                     st.markdown(
                         "Curvature of the picked horizon line — the 2-D analogue of the "
-                        "surface-curvature attribute used in 3D interpretation (report Sec 8.6.4: "
-                        "\"computed from the second derivatives of the surface's time or depth "
-                        "values\"; here from the single lateral direction a 2D line has)."
+                        "surface-curvature attribute used in 3D interpretation, computed from the "
+                        "second derivatives of the surface's time or depth values; here from the "
+                        "single lateral direction a 2D line has."
                     )
                     horizon_time = interpolate_horizon(h.picks, cdp_list)
                     kappa = horizon_curvature(horizon_time, cdp_list, survey.group_interval)
@@ -359,7 +351,7 @@ def render():
     with tab_map:
         _step_caption(3)
         st.markdown(
-            "Report Sec 8.5: grids a picked horizon into a continuous surface and, given a velocity "
+            "Grids a picked horizon into a continuous surface and, given a velocity "
             "model, converts it from two-way time to true depth. This app works with a single 2D "
             "line rather than a 3D volume, so there is no areal grid to contour — the equivalent "
             "quantity here is the horizon's time (or depth) value as a continuous **profile** along "
@@ -379,7 +371,7 @@ def render():
                 theme=None, key="map_time_profile")
 
             st.divider()
-            st.markdown("**Time-to-depth conversion** (report Eq. 8.5: `Z = Vavg(t) * t / 2`).")
+            st.markdown("**Time-to-depth conversion** (`Z = Vavg(t) * t / 2`).")
             vfield = st.session_state.get("Vfield_2")
             vel_source = st.radio("Average velocity source",
                                     ["Constant (enter a value)", "From RMS velocity field (Pass 2)"]

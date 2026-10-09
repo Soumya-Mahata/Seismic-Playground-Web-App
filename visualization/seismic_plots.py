@@ -3,11 +3,10 @@ visualization/seismic_plots.py — Core Seismic Display
 =========================================================
 Section (image) displays, gather displays, wiggle/variable-area traces,
 before/after QC comparisons, and fold maps. Plotly throughout for
-interactivity (zoom, pan, hover amplitude, colorbar) — matching the
-reference app's visualization approach — with matplotlib reserved for
-nothing here (wiggle/VA is implemented as filled Plotly traces, which
-stays interactive and is legible for the moderate trace counts a
-"trace viewer" window realistically shows).
+interactivity (zoom, pan, hover amplitude, colorbar), with matplotlib
+reserved for nothing here (wiggle/VA is implemented as filled Plotly
+traces, which stays interactive and is legible for the moderate trace
+counts a "trace viewer" window realistically shows).
 """
 
 from __future__ import annotations
@@ -221,24 +220,19 @@ def plot_fk_spectrum(f: np.ndarray, k: np.ndarray, magnitude: np.ndarray, *,
     optional accept/reject polygon overlay — used both for passive F-K QC
     and for manual polygon definition. `polygon_mode` only changes the
     label/color (green=accept/signal, red=reject/noise); the boundary
-    itself is drawn identically either way.
-
-    Only the non-negative-frequency half (f >= 0) is displayed. A real
-    gather's F-K spectrum is Hermitian-symmetric (f<0 is a mirror image
-    of f>0, see `fk_filter_gather`'s own `inside_mirrored` handling), and
-    every reference figure for this filter (report Figs. 5.64B, 5.67)
-    plots only f=0..f_max — never the redundant negative-frequency half.
-    Showing the full -f..+f range made the accept/reject polygon (which
-    is only generated/drawn for f>=0) look like it covered just half the
-    picture instead of the whole spectrum, which was the actual source of
-    the reported "shape doesn't match the reference" mismatch; cropping
-    to f>=0 here fixes that without changing any filtering math."""
-    f_pos = f >= 0
-    f = f[f_pos]
-    magnitude = magnitude[:, f_pos]
+    itself is drawn identically either way."""
     mag_db = 20 * np.log10(magnitude.T + 1e-6)
     mag_db -= mag_db.max()
-    fig = go.Figure(go.Heatmap(z=mag_db, x=k, y=f, colorscale="Turbo", zmin=-60, zmax=0, zsmooth="best",
+    # The grid spans f = -Nyquist..+Nyquist (from fftshift), but a real
+    # signal's F-K spectrum is Hermitian-symmetric (f<0 is the mirror of
+    # f>0), so only the f>=0 half is plotted here — showing the redundant
+    # mirror half just compresses the part that actually matters and
+    # makes the polygon overlay look incomplete. Display-only crop; the
+    # filter math upstream still uses the full mirrored spectrum (see
+    # `fk_filter_gather`).
+    f_pos_idx = f >= 0
+    f_disp, mag_db = f[f_pos_idx], mag_db[f_pos_idx, :]
+    fig = go.Figure(go.Heatmap(z=mag_db, x=k, y=f_disp, colorscale="Turbo", zmin=-60, zmax=0, zsmooth="best",
                                 colorbar=dict(title="dB", **theme.COLORBAR)))
     rings = _polygon_rings(polygon_points)
     color = "#22c55e" if polygon_mode == "accept" else "#ef4444"
@@ -270,25 +264,23 @@ def plot_fk_before_after(f: np.ndarray, k: np.ndarray, mag_before: np.ndarray, m
     """Side-by-side F-K amplitude spectra before/after applying the
     accept/reject polygon mask — the direct QC for "is the filter
     actually removing the ground-roll energy and leaving the signal
-    zone alone", which a single spectrum plot cannot show.
-
-    Cropped to f >= 0 for the same reason as `plot_fk_spectrum` — matches
-    the reference figures and keeps the polygon overlay (only ever
-    generated for f>=0) filling the whole visible panel."""
-    f_pos = f >= 0
-    f = f[f_pos]
-    mag_before = mag_before[:, f_pos]
-    mag_after = mag_after[:, f_pos]
+    zone alone", which a single spectrum plot cannot show."""
     db_before = 20 * np.log10(mag_before.T + 1e-6)
     db_before -= db_before.max()
     db_after = 20 * np.log10(mag_after.T + 1e-6)
     db_after -= db_after.max()
+    # Display-only crop to f>=0 — see the matching comment in
+    # `plot_fk_spectrum` (Hermitian symmetry means the negative-frequency
+    # mirror half is redundant and not shown).
+    f_pos_idx = f >= 0
+    f_disp = f[f_pos_idx]
+    db_before, db_after = db_before[f_pos_idx, :], db_after[f_pos_idx, :]
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True,
                          subplot_titles=("<b>F-K spectrum — before</b>", "<b>F-K spectrum — after</b>"),
                          horizontal_spacing=0.08)
-    fig.add_trace(go.Heatmap(z=db_before, x=k, y=f, colorscale="Turbo", zmin=-60, zmax=0,
+    fig.add_trace(go.Heatmap(z=db_before, x=k, y=f_disp, colorscale="Turbo", zmin=-60, zmax=0,
                               zsmooth="best", showscale=False), row=1, col=1)
-    fig.add_trace(go.Heatmap(z=db_after, x=k, y=f, colorscale="Turbo", zmin=-60, zmax=0, zsmooth="best",
+    fig.add_trace(go.Heatmap(z=db_after, x=k, y=f_disp, colorscale="Turbo", zmin=-60, zmax=0, zsmooth="best",
                               colorbar=dict(title="dB", **theme.COLORBAR)), row=1, col=2)
     rings = [r for r in _polygon_rings(polygon_points) if len(r) >= 3]
     color = "#22c55e" if polygon_mode == "accept" else "#ef4444"
@@ -313,7 +305,7 @@ def plot_fk_pass_mask(f: np.ndarray, k: np.ndarray, pass_mask: np.ndarray, *,
     bin (0..1) — the most direct possible QC for an F-K filter: rather
     than inferring what happened from before/after spectra, this is
     exactly what was multiplied onto the data, including the taper and
-    the small non-zero floor on the attenuated side (report Fig. 5.66)."""
+    the small non-zero floor on the attenuated side."""
     fig = go.Figure(go.Heatmap(z=pass_mask.T, x=k, y=f, colorscale="Greys", zmin=0, zmax=1, zsmooth="best",
                                 colorbar=dict(title="Multiplier", **theme.COLORBAR)))
     fig.update_layout(**theme.base_layout(title, height))

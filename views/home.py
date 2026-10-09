@@ -6,7 +6,7 @@ import streamlit as st
 
 import config as cfg
 from modules.pipeline import PIPELINE_STAGES
-from utils import session_state as ss
+from utils import workflow_ui as wf
 
 
 def render():
@@ -14,10 +14,9 @@ def render():
     st.caption(cfg.APP_TAGLINE)
     st.markdown(
         "**From raw seismic data → processing → QC → interpretation → insights.** "
-        "A guided, interactive re-implementation of a 2D land seismic-processing "
-        "workflow — the same processing sequence you'd otherwise run cell-by-cell "
-        "in a notebook, as a proper application with parameter controls and QC at "
-        "every step."
+        "A guided, interactive 2D land seismic-processing and interpretation "
+        "workflow, built as a proper application with parameter controls and QC "
+        "at every step."
     )
 
     survey = st.session_state["survey"]
@@ -33,10 +32,11 @@ def render():
             if survey.is_synthetic:
                 st.caption("🧪 Synthetic test data")
     with c2:
-        st.markdown("### ⚙️ Processing progress")
+        st.markdown("### ⚙️ Processing")
         done = len(st.session_state["completed_stages"])
         total = len(PIPELINE_STAGES)
-        st.progress(done / total, text=f"{done}/{total} stages complete")
+        st.progress(done / total, text=f"{done} of {total} steps run")
+        st.caption("Many steps are optional, so this is activity, not a score.")
     with c3:
         st.markdown("### 🧭 Interpretation")
         st.caption(f"{len(st.session_state['horizons'])} horizon(s), "
@@ -44,20 +44,12 @@ def render():
                     f"{len(st.session_state['attributes'])} attribute(s) computed")
 
     st.divider()
-    st.markdown("### Workflow")
-    cols = st.columns(4)
-    groups = [
-        ("📂 Data & Shot Gathers", PIPELINE_STAGES[0:2]),
-        ("⚙️ Pre-Stack Conditioning", PIPELINE_STAGES[2:10]),
-        ("🔀 CDP Sort → 🎯 Velocity/NMO/DMO", PIPELINE_STAGES[10:18]),
-        ("📚 Stack → 🗺️ Migration", PIPELINE_STAGES[18:24]),
-    ]
-    for col, (label, stages) in zip(cols, groups):
-        with col:
-            st.markdown(f"**{label}**")
-            for s in stages:
-                mark = "✅" if ss.is_stage_done(s.id) else "⬜"
-                st.caption(f"{mark} {s.label}")
+    st.markdown("### Workflow status")
+    st.caption("The numbered order is the *recommended* order. Only a step's genuine inputs gate "
+                "it; optional steps can be skipped or reordered.")
+    wf.home_status()
+    with st.expander("Processing history (in the order steps were run)"):
+        wf.history_table()
 
     st.divider()
     st.markdown("### Quick start")
@@ -67,13 +59,17 @@ def render():
         "stack. Then build shot gathers.\n"
         "2. **Pre-Stack Conditioning** — band-pass, AGC, trace edit/kill/de-spike, mute, "
         "balance, F-K filter (auto or click-drawn polygon), multiple suppression, "
-        "deconvolution — all in the shot domain.\n"
-        "3. **CDP Sort & Binning** — re-group the conditioned data by CDP, with a fold map "
-        "and a semblance preview.\n"
+        "deconvolution — all in the shot domain, and **all optional**: run any subset, in the "
+        "order that suits the data. A step that is normally done first but wasn't gets a ⚠ "
+        "and a *Continue?* prompt, never a block.\n"
+        "3. **CDP Sort & Binning** — re-group the (conditioned or raw) shot data by CDP, with a "
+        "fold map and a semblance preview.\n"
         "4. **Velocity, NMO & DMO** — pick stacking velocities by auto-pick, **click directly "
         "on the semblance panel**, or Constant-Velocity-Stack QC; apply NMO, solve residual "
-        "statics, DMO.\n"
-        "5. **Stacking → Post-Stack → Migration** — produce the final processed section.\n"
+        "statics, DMO. NMO needs a velocity field; the refinement steps are optional.\n"
+        "5. **Stacking → Post-Stack → Migration** — stacking needs NMO-corrected gathers; "
+        "post-stack steps are independent; migration needs a section + velocity (post-stack) or "
+        "pre-stack gathers + velocity (PSTM).\n"
         "6. **Interpretation & Attributes** — click to pick horizons/faults; compute "
         "industry-standard attributes (RMS, variance, sweetness, coherence, curvature, ...).\n"
         "7. **Export** — download processed SEG-Y, picks, attributes, figures, and a report."
@@ -89,15 +85,15 @@ def render():
 
     with st.expander("ℹ️ About this app"):
         st.markdown(
-            "Built from a reference 2D land seismic-processing notebook — pre-stack conditioning "
-            "(band-pass, AGC, trace edit, mute, balance, F-K, multiple suppression, "
-            "deconvolution) applied in the **shot domain**, CDP sort/binning, two-pass velocity "
-            "analysis/NMO/DMO, stacking, post-stack conditioning, and Kirchhoff migration — "
-            "cross-checked against a standard industry processing flow, plus an interpretation "
-            "layer (horizon/fault picking, industry-standard attributes, an approximate well "
-            "tie) not present in the source notebook.\n\n"
-            "See `README.md` for the full list of documented assumptions and deliberate "
-            "deviations from the source notebook — including one real bug that was found and "
-            "fixed in the NMO correction, and a picker redesign that fixed a systematic "
-            "velocity-tracking failure at depth and at survey edges."
+            "A full 2D land seismic-processing and interpretation workflow — pre-stack "
+            "conditioning (band-pass, AGC, trace edit, mute, balance, F-K, multiple "
+            "suppression, deconvolution) applied in the **shot domain**, CDP sort/binning, "
+            "two-pass velocity analysis/NMO/DMO, stacking, post-stack conditioning, and "
+            "migration — matching a standard industry processing flow, plus an "
+            "interpretation layer (well-to-seismic tie, horizon/fault picking, surface "
+            "mapping, and industry-standard attribute analysis).\n\n"
+            "See `README.md` for the full list of documented design decisions, including "
+            "a documented interpolation-convention fix in the NMO correction and a "
+            "velocity-picker design that avoids systematic tracking failures at depth and "
+            "at survey edges."
         )

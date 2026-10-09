@@ -22,18 +22,18 @@ import pandas as pd
 import streamlit as st
 
 import config as cfg
-from modules import nmo, segy_io, synthetic_data
+from modules import nmo, segy_io, stage_ops, synthetic_data
 from modules.stacking import fold_normalized_stack
 from modules.validation import ValidationError, validate_survey
 from utils import session_state as ss
+from utils import workflow_ui as wf
 from utils.formatting import fmt_ms
 from visualization import seismic_plots, spectra_plots
 
 
 def _load_survey(survey, source_label: str):
-    ss.invalidate_from("upload", include_self=True)
-    st.session_state["survey"] = survey
-    ss.mark_stage_done("upload", params={"source": source_label, "traces": survey.num_traces})
+    # Loading a survey replaces the data: every stage derived from the old one is discarded.
+    stage_ops.run_load_survey(st.session_state, survey, source_label)
     st.rerun()
 
 
@@ -74,9 +74,9 @@ def render():
             n_stations = col1.number_input("Receiver stations", 40, 300, 160, step=10)
             shot_interval = col2.number_input("Shot interval (stations)", 1, 10, 2)
             channels = col3.number_input("Channels per side (≈ half of channels per shot)", 10, 90, 60, step=5,
-                                          help="This is a split/centre-spread survey (summer report "
-                                               "Sec 5.5.1.1): each shot sits in the middle of its "
-                                               "receiver patch and records on BOTH sides at once, so "
+                                          help="This is a split/centre-spread survey: each shot sits "
+                                               "in the middle of its receiver patch and records on "
+                                               "BOTH sides at once, so "
                                                "the actual channel count for one shot is roughly 2x "
                                                "this number (fewer near the survey edges, where the "
                                                "patch runs off the end of the line). That is real "
@@ -85,29 +85,27 @@ def render():
                                                "trace count explicitly.")
             st.caption(f"→ a mid-line shot will show up to ~{2*int(channels)} channels/shot below "
                        f"(2 × {int(channels)}), tapering down near the survey's edges.")
+
             col4, col5 = st.columns(2)
             dx = col4.number_input(
-                "Trace/group spacing dx (m)", 5.0, 50.0, 6.25, step=1.25, format="%.2f",
-                help="Receiver spacing along the line. This sets the F-K spectrum's wavenumber "
-                     "Nyquist limit seen on the Pre-Stack Conditioning page's F-K filter tab: "
-                     "k_max = 1 / (2·dx). The default 6.25 m gives k_max = 0.08 cycles/m, matching "
-                     "the wavenumber range used in the reference material's own f-k polygon figures "
-                     "(fk_filter.pdf Figs. 5.64/5.67) so the default 'Apparent-velocity wedge' "
-                     "polygon there tapers across the spectrum the same way theirs does, rather "
-                     "than saturating to the full wavenumber width within the first ~15% of the "
-                     "frequency axis the way a coarser real-world spacing (e.g. 25 m, k_max = 0.02) "
-                     "would. Raise dx here for a coarser, more aliasing-prone survey instead.")
-            dt_ms = col5.number_input(
-                "Sample interval dt (ms)", 1.0, 4.0, 2.0, step=0.5, format="%.1f",
-                help="Time sampling. Sets the F-K spectrum's frequency Nyquist: f_max = 1 / (2·dt). "
-                     "2 ms (the default) gives f_max = 250 Hz.")
-            k_nyq_preview = 0.5 / dx
-            f_nyq_preview = 0.5 / (dt_ms / 1000.0)
-            st.caption(f"→ this survey's F-K spectrum will span k = ±{k_nyq_preview:.4f} cycles/m "
-                       f"and f = 0–{f_nyq_preview:.0f} Hz.")
+                "Receiver/station spacing (m)", 1.0, 50.0, 6.25, step=0.25,
+                help="Sets the F-K domain's wavenumber Nyquist (k_max = 1 / (2·dx)). The default "
+                     "6.25 m gives a k_max ≈ 0.08 cycles/m, so the default accept/reject wedge in "
+                     "the F-K Filter tab comes out as a gradually-tapering shape. A coarser "
+                     "real-world spacing (e.g. 25 m) is still fully supported — it "
+                     "just gives a smaller k_max, so the same velocity-cutoff wedge saturates to the "
+                     "full wavenumber width closer to f=0. Use the custom-polygon option in the F-K "
+                     "Filter tab to hand-edit the shape for any spacing.")
+            dt_ms = col5.number_input("Sample interval (ms)", 0.5, 4.0, 2.0, step=0.5,
+                                       help="Sets the time (frequency) Nyquist. 2 ms is standard for "
+                                            "land reflection surveys.")
+            dt_s = dt_ms / 1000.0
+            k_nyq_preview, f_nyq_preview = 1.0 / (2 * dx), 1.0 / (2 * dt_s)
+            st.caption(f"→ F-K domain for this survey: k = ±{k_nyq_preview:.3f} cycles/m, "
+                       f"f = 0–{f_nyq_preview:.0f} Hz.")
             inject_noise = st.checkbox(
                 "Inject realistic field-noise conditions (dead channels, powerline harmonic noise, "
-                "spike bursts — report Sec 5.7)", value=True,
+                "spike bursts)", value=True,
                 help="Without this, the synthetic data is perfectly clean and the Trace Edit / "
                      "De-spike / Mute steps have nothing to actually fix. On by default so those "
                      "steps are demonstrably doing something.")
@@ -115,8 +113,8 @@ def render():
                 with st.spinner("Generating..."):
                     new_survey = synthetic_data.generate_synthetic_survey(
                         n_stations=int(n_stations), shot_interval_stations=int(shot_interval),
-                        channels_per_side=int(channels), inject_field_noise=inject_noise,
-                        dx=float(dx), dt=float(dt_ms) / 1000.0)
+                        channels_per_side=int(channels), dx=float(dx), dt=float(dt_s),
+                        inject_field_noise=inject_noise)
                 _load_survey(new_survey, "synthetic")
 
     if survey is None:
@@ -273,10 +271,12 @@ def render():
         "all applied in the shot domain — the domain the data was actually recorded in. CDP "
         "sort/binning happens later, once conditioning is complete."
     )
-    if st.button("Build shot gathers", type="primary"):
-        shot_gathers = segy_io.build_shot_gathers(survey, n_min_traces=1)
-        st.session_state["shot_gathers"] = shot_gathers
-        ss.mark_stage_done("shot_gathers", params={"n_shots": len(shot_gathers)})
+    st.caption("Shot gathers are needed for shot-domain conditioning (band-pass, AGC, ...). They are "
+               "**optional** otherwise: CDP Sort only needs the loaded survey, so already-processed "
+               "data can go straight to CDP Sort & Binning.")
+    wf.show_status("shot_gathers")
+    if wf.run_button("shot_gathers", "Build shot gathers", key="run_shot_gathers"):
+        stage_ops.run_build_shot_gathers(st.session_state)
         st.rerun()
 
     if ss.is_stage_done("shot_gathers"):
@@ -285,7 +285,8 @@ def render():
         total_in_shots = int(ch_counts.sum())
         st.success(f"✅ {len(shot_gathers)} shot gathers built "
                     f"({ch_counts.min()}-{ch_counts.max()} channels/shot). "
-                    f"Continue to **Pre-Stack Conditioning**.")
+                    f"Continue to **Pre-Stack Conditioning** (or skip it and go straight to "
+                    f"**CDP Sort & Binning**).")
         match = total_in_shots == survey.num_traces
         icon = "✅" if match else "⚠️"
         st.caption(
@@ -300,8 +301,7 @@ def render():
             + ("A per-shot channel count noticeably larger than a 'channels per side' "
                "setting is expected for a split/centre-spread survey (shot in the middle "
                "of its receiver patch, recording both flanks at once) — that is real "
-               "acquisition geometry, confirmed against the summer report's spread-type "
-               "definitions (Sec 5.5.1.1), not a doubling bug." if survey.is_synthetic else
+               "acquisition geometry, not a doubling bug." if survey.is_synthetic else
                "A wide range of channels/shot across different shots is normal (edge "
                "shots record fewer live channels than mid-line shots) and reflects "
                "whatever live-receiver patch is recorded in the file's own headers for "

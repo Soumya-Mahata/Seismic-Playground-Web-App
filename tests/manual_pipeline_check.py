@@ -36,10 +36,10 @@ for g in shot_gathers.values():
     g["traces_edited"] = preprocessing.apply_trace_kill(cleaned, flags["kill"])
 print("[4] Trace edit / kill / de-spike done")
 
-# 4) mute (shot domain)
+# 4) top mute (shot domain)
 for g in shot_gathers.values():
     g["traces_muted"] = preprocessing.apply_top_bottom_mute(g["traces_edited"], dt, t_top=cfg.MUTE_TTOP_DEFAULT)
-print("[5] Mute done")
+print("[5] Top mute done")
 
 # 5) trace balancing (shot domain)
 for g in shot_gathers.values():
