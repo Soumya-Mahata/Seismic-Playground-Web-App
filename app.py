@@ -66,21 +66,12 @@ with st.sidebar:
                 text=f"{len(st.session_state['completed_stages'])} of {len(_pipeline_stages)} steps run")
     if st.session_state["survey"] is not None:
         st.caption(f"📂 {st.session_state['survey'].source_name}")
-    agc_cfg = st.session_state.get("agc_config")
-    if agc_cfg:
-        st.caption(f"🔧 AGC applied: **{agc_cfg['mode'].upper()}**, window={agc_cfg['window']} samples.")
-    mute_cfg = st.session_state.get("mute_config")
-    if mute_cfg:
-        st.caption(f"✂️ Active mute: {mute_cfg.get('summary', '')}")
-    fk_cfg = st.session_state.get("fk_config")
-    if fk_cfg:
-        st.caption(f"🌊 Active F-K filter: {fk_cfg.get('mode', '?')} polygon, {fk_cfg.get('source', '')}, "
-                    f"coeff={fk_cfg.get('coeff', 0):.3f}")
+    wf.sidebar_current_data()
     with st.expander("Workflow status"):
         wf.sidebar_status()
-    if st.session_state["history"]:
-        with st.expander("Processing history (execution order)"):
-            for h in sorted(st.session_state["history"], key=lambda e: e.seq):
-                st.caption(f"{h.seq}. {h.label}")
+    if len(ss.graph()):
+        with st.expander("Data states (execution order)"):
+            wf.sidebar_history()
 
+wf.render_flash()
 PAGES[page]()

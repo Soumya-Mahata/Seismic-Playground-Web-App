@@ -18,16 +18,17 @@ def render():
                 "Analysis**. Standard Hilbert-transform-based instantaneous attributes, computed on "
                 "the processed section.")
 
-    section, section_label = ss.best_available_section()
+    section_state, section_label = ss.best_available_state()
+    section = ss.section(section_state)
     if section is None:
         st.info("Attributes need a section: run Stacking (or a pre-stack migration) first.", icon="ℹ️")
         return
 
     survey = st.session_state["survey"]
-    cdp_list = st.session_state["cdp_list"]
+    cdp_list = ss.cdp_list(section_state)
     dt, twt = survey.sample_interval, survey.twt
 
-    st.caption(f"Computing on: **{section_label}**")
+    st.caption(f"Computing on: **{section_label}** (state {section_state.id})")
     attr_name = st.selectbox("Attribute", list(ATTRIBUTE_REGISTRY.keys()))
     if st.button("Compute attribute", type="primary"):
         with st.spinner(f"Computing {attr_name}..."):

@@ -20,7 +20,7 @@ import streamlit as st
 
 import config as cfg
 from modules import stage_ops
-from modules.pipeline import SECTION_KEY
+from modules.dependencies import state_name
 from utils import session_state as ss
 from utils import workflow_ui as wf
 from visualization import controls, seismic_plots
@@ -31,8 +31,8 @@ _POST, _PRE = "Post-stack (Kirchhoff time migration)", "Pre-stack (PSTM, on CDP 
 def _comparison_section():
     """The un-migrated section to compare a migration against, if one
     exists (it is optional: PSTM does not need a stack)."""
-    head = ss.workflow().stream_head("section")
-    return (st.session_state.get(SECTION_KEY[head]), wf.SHORT.get(head, head)) if head else (None, None)
+    head = ss.current("section")
+    return (ss.section(head), state_name(head)) if head is not None else (None, None)
 
 
 def _migration_block(survey, cdp_list):
@@ -76,7 +76,7 @@ def _migration_block(survey, cdp_list):
         if chk.can_run:
             c1, c2 = st.columns(2)
             stride = c1.slider("Output CDP stride (1 = every CDP, slow)", 1, 10, 3, key="pstm_stride")
-            c2.caption(f"Migrating from `{wf.input_key(chk)}` — {wf.input_name(chk)} gathers "
+            c2.caption(f"Migrating from the {wf.input_name(chk)} gathers "
                         f"(offset-preserved), velocity: **{wf.input_name(chk, 'velocity')}** field. "
                         f"**Not** the NMO-corrected/stacked data, since PSTM needs the true offsets.")
             est_cost = (len(cdp_list) // stride) * (2 * aperture_traces + 1) * 20
@@ -89,30 +89,33 @@ def _migration_block(survey, cdp_list):
                     wf.execute(stage_ops.run_migration_pstm, aperture_m=aperture_m, cdp_stride=stride,
                                progress_cb=lambda f: prog.progress(f, text="Pre-stack time migrating..."))
 
-    if not ss.is_stage_done("migration"):
+    e = wf.result("migration")
+    if e is None:
         return
-    e = ss.entry("migration")
-    ran = "pre-stack (PSTM)" if e.variant == "pstm" else "post-stack"
-    st.success(f"✅ Migration complete ({ran}).")
+    wf.result_note(e)
+    cdp_list = ss.cdp_list(e.state)
+    migrated = ss.section(e.state)
+    ran = "pre-stack (PSTM)" if e.state.variant == "pstm" else "post-stack"
+    st.success(f"✅ Migration complete ({ran}) — **{e.name}**.")
     disp = controls.section_display_controls("mig_display", default_colorscale="Seismic")
     twt = survey.twt
-    before, before_name = (st.session_state.get(e.input_key), wf.input_name(e)) \
-        if e.variant != "pstm" else _comparison_section()
+    before, before_name = (ss.section(e.src), state_name(e.src)) \
+        if e.state.variant != "pstm" else _comparison_section()
     if before is not None:
         st.plotly_chart(seismic_plots.plot_before_after(
-            before, st.session_state["stack_migrated"], cdp_list, twt,
+            before, migrated, cdp_list, twt,
             title_before=f"Pre-migration ({before_name})", title_after="Migrated",
             colorscale=disp.colorscale, equalize=disp.equalize),
             theme=None, key="migration_view_chart_1001")
     else:
         st.plotly_chart(seismic_plots.plot_section(
-            st.session_state["stack_migrated"], np.array(cdp_list), twt, title="Migrated section",
+            migrated, np.array(cdp_list), twt, title="Migrated section",
             colorscale=disp.colorscale, pclip=disp.pclip, gain=disp.gain, equalize=disp.equalize,
             height=600), theme=None, key="migration_view_chart_1001")
         st.caption("No stacked section exists to compare against — the pre-stack migration did not need one.")
-    if st.session_state.get("pstm_fold") is not None:
+    if ss.blob(e.state, "fold") is not None:
         st.plotly_chart(seismic_plots.plot_section(
-            st.session_state["pstm_fold"], np.array(cdp_list), twt, title="PSTM Fold (QC)",
+            ss.blob(e.state, "fold"), np.array(cdp_list), twt, title="PSTM Fold (QC)",
             colorscale="Viridis", pclip=100.0), theme=None, key="pstm_fold_qc")
 
 
@@ -130,12 +133,16 @@ def _final_scaling_block(survey, cdp_list):
         if wf.run_button("final_scale", "Run final scaling", key="run_final_scale"):
             wf.execute(stage_ops.run_final_scale, window=window)
 
-    if ss.is_stage_done("final_scale"):
-        st.success("🎉 Final scaling applied — this is the final processed section.")
+    fe = wf.result("final_scale")
+    if fe is not None:
+        wf.result_note(fe)
+        cdp_list = ss.cdp_list(fe.state)
+        st.success(f"🎉 Final scaling applied — **{fe.name}** (from {state_name(fe.src)}) is the final "
+                    f"processed section.")
         st.markdown("**Display controls**")
         disp2 = controls.section_display_controls("final_display", default_colorscale="Seismic")
         st.plotly_chart(seismic_plots.plot_section(
-            st.session_state["stack_final"], np.array(cdp_list), survey.twt,
+            ss.section(fe.state), np.array(cdp_list), survey.twt,
             title="Final Processed Section", colorscale=disp2.colorscale, pclip=disp2.pclip,
             gain=disp2.gain, equalize=disp2.equalize, height=650), theme=None, key="migration_view_chart_1002")
 
@@ -149,8 +156,8 @@ def render():
         return
     cdp_list = st.session_state["cdp_list"]
     wf.data_state_caption("section", "Current stacked section")
-    wf.stale_banner(["migration", "final_scale"])
-    wf.undo_panel(["migration", "final_scale"], "undo_migration")
+    wf.stale_banner(wf.stale_for_ops(["migration", "final_scale"]))
+    wf.states_panel(["image", "final"], "states_image", "🗂 Migrated / final data states · undo · redo")
 
     _migration_block(survey, cdp_list)
     _final_scaling_block(survey, cdp_list)

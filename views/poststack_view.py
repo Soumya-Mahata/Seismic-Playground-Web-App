@@ -14,13 +14,15 @@ import streamlit as st
 
 import config as cfg
 from modules import stage_ops
+from modules.dependencies import state_name
 from utils import session_state as ss
 from utils import workflow_ui as wf
 from visualization import seismic_plots, spectra_plots
 
 
-def _before_label(entry) -> str:
-    return wf.input_name(entry)
+def _before_label(res) -> str:
+    """'Stack (S15)' — the section state this run read."""
+    return state_name(res.src)
 
 
 def render():
@@ -29,17 +31,16 @@ def render():
                 "All three are optional and independent: each acts on the current stacked section, "
                 "so apply any of them, in any order, or skip them and go straight to migration.")
 
-    if st.session_state["stack_matrix"] is None or not ss.is_stage_done("stack"):
+    if ss.current("section") is None:
         wf.show_status("rna")          # ⛔ — a stacked section is the one genuine input
         return
 
     survey = st.session_state["survey"]
-    cdp_list = st.session_state["cdp_list"]
     dt, twt = survey.sample_interval, survey.twt
 
     wf.data_state_caption("section", "Current stacked section")
-    wf.stale_banner(["rna", "decon_post", "tvf", "migration", "final_scale"])
-    wf.undo_panel(["rna", "decon_post", "tvf"], "undo_poststack")
+    wf.stale_banner(wf.stale_for_ops(["rna", "decon_post", "tvf", "migration", "final_scale"]))
+    wf.states_panel(["section"], "states_section", "🗂 Stacked / post-stack data states · undo · redo")
 
     tabs = st.tabs(["18. Random Noise Attenuation", "19. Deconvolution", "20. Time-Variant Filter"])
 
@@ -53,11 +54,14 @@ def render():
             window = st.slider("Spatial window (traces)", 3, 15, cfg.RNA_SPATIAL_WINDOW_DEFAULT, step=2, key="rna_window")
             if wf.run_button("rna", "Run random noise attenuation", key="run_rna"):
                 wf.execute(stage_ops.run_rna, spatial_window=window)
-        if ss.is_stage_done("rna"):
-            e = ss.entry("rna")
-            st.success(f"✅ Random noise attenuation applied to the {_before_label(e)} section.")
+        e = wf.result("rna")
+        if e is not None:
+            wf.result_note(e)
+            cdp_list = ss.cdp_list(e.state)
+            st.success(f"✅ Random noise attenuation applied to the {_before_label(e)} section "
+                        f"→ **{e.name}**.")
             st.plotly_chart(seismic_plots.plot_before_after(
-                st.session_state[e.input_key], st.session_state["stack_rna"], cdp_list, twt,
+                ss.section(e.src), ss.section(e.state), cdp_list, twt,
                 title_before=_before_label(e), title_after="After RNA"), theme=None, key="poststack_view_chart_1001")
 
     with tabs[1]:
@@ -70,15 +74,18 @@ def render():
                                   step=0.005, format="%.3f", key="decon2_pw")
             if wf.run_button("decon_post", "Run post-stack deconvolution", key="run_decon2"):
                 wf.execute(stage_ops.run_decon_post, operator_length=oplen, pre_whitening=pw)
-        if ss.is_stage_done("decon_post"):
-            e = ss.entry("decon_post")
-            before = st.session_state[e.input_key]
-            st.success(f"✅ Post-stack deconvolution applied to the {_before_label(e)} section.")
+        e = wf.result("decon_post")
+        if e is not None:
+            wf.result_note(e)
+            cdp_list = ss.cdp_list(e.state)
+            before, after = ss.section(e.src), ss.section(e.state)
+            st.success(f"✅ Post-stack deconvolution applied to the {_before_label(e)} section "
+                        f"→ **{e.name}**.")
             st.plotly_chart(spectra_plots.plot_spectrum_comparison(
-                before, st.session_state["stack_decon_post"], dt,
+                before, after, dt,
                 title="Spectrum — Post-Stack Deconvolution"), theme=None, key="poststack_view_chart_1002")
             st.plotly_chart(seismic_plots.plot_before_after(
-                before, st.session_state["stack_decon_post"], cdp_list, twt,
+                before, after, cdp_list, twt,
                 title_before="Before", title_after="After decon"), theme=None, key="poststack_view_chart_1003")
 
     with tabs[2]:
@@ -95,9 +102,11 @@ def render():
             if wf.run_button("tvf", "Run time-variant filter", key="run_tvf"):
                 with st.spinner("Applying time-variant filter..."):
                     wf.execute(stage_ops.run_tvf)
-        if ss.is_stage_done("tvf"):
-            e = ss.entry("tvf")
-            st.success("✅ Time-variant filter applied — ready for migration.")
+        e = wf.result("tvf")
+        if e is not None:
+            wf.result_note(e)
+            cdp_list = ss.cdp_list(e.state)
+            st.success(f"✅ Time-variant filter applied → **{e.name}** — ready for migration.")
             st.plotly_chart(seismic_plots.plot_before_after(
-                st.session_state[e.input_key], st.session_state["stack_tvf"], cdp_list, twt,
+                ss.section(e.src), ss.section(e.state), cdp_list, twt,
                 title_before=f"Before TVF ({_before_label(e)})", title_after="After TVF"), theme=None, key="poststack_view_chart_1004")

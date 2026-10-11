@@ -1,34 +1,32 @@
 """
-modules/pipeline.py — Stage Registry (recommended order) & Processing History
-================================================================================
-This module deliberately holds only the *descriptive* half of the
-workflow model. Four things that used to be fused into "the pipeline" are
-kept separate, and this file owns two of them:
+modules/pipeline.py — Stage Registry (recommended order) & what each stage produces
+======================================================================================
+The *descriptive* half of the workflow model. Four things that used to be
+fused into "the pipeline" are kept apart, and this file owns the first:
 
   1. RECOMMENDED PROCESSING ORDER   -> `PIPELINE_STAGES` (this file).
      The conventional sequence, used for the sidebar/home layout and as
      documentation. It is advice, never an execution constraint.
   2. GENUINE COMPUTATIONAL DEPENDENCIES -> `modules/dependencies.py`.
      What a stage actually needs to exist before it can run.
-  3. CURRENT DATA STATE             -> derived from the processing history
-     by `modules/dependencies.WorkflowState` (which products exist, and
-     what has been applied to the data a stage would read next).
-  4. PROCESSING HISTORY             -> `HistoryEntry` / `log_step` (this
-     file). An *execution-order* log: what was run, in what order, on
-     which upstream outputs, with which parameters.
+  3. DATA STATES                    -> `modules/state_graph.py`.
+     What data actually exists: every operation consumes states and
+     produces a new one (INPUT STATE -> OPERATION + PARAMETERS -> OUTPUT
+     STATE), recorded with a stable id and lineage fingerprint.
+  4. PROCESSING HISTORY             -> the states, in creation order.
 
-Also here: the per-stage data keys (which dict key a stage writes), so a
-stage can find "the output of the stage I am reading from" without
-hard-coding the previous stage's name.
+Also here: the *kind* of data each stage produces (`STAGE_KIND`), which is
+how a stage asks for "the current shot-domain data" without naming the
+stage that happened to make it, and the data-store defaults.
 
 No Streamlit dependency — pure data + small helpers.
 """
 
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
 import config as cfg
 
@@ -118,11 +116,9 @@ STAGE_GROUPS: List[Tuple[str, str]] = [
 def stages_from(stage_id: str) -> List[str]:
     """Every stage at or after `stage_id` in the RECOMMENDED order.
 
-    Retained for display/documentation only. It is NOT used for
-    invalidation any more: re-running a stage invalidates exactly the
-    stages that consumed its output (see `WorkflowState.dependents`),
-    which is a different — and smaller — set than "everything later in
-    the recommended order"."""
+    Retained for display/documentation only. Nothing is invalidated by
+    position in the recommended order: states are never overwritten, and
+    what depends on a state is read from the graph (`ProcessingGraph.dependents`)."""
     i = STAGE_INDEX[stage_id]
     return [s.id for s in PIPELINE_STAGES[i:]]
 
@@ -133,122 +129,59 @@ def stage_label(stage_id: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 2) WHERE EACH STAGE'S OUTPUT LIVES
+# 2) WHAT EACH STAGE PRODUCES
 # ─────────────────────────────────────────────────────────────────────────
-# The per-gather dict key each stage's *trace* output is stored under (an
-# accumulation pattern: every stage adds a new key so earlier stages'
-# outputs stay available for before/after QC). Pre-stack conditioning
-# (despike..decon) runs on *shot* gathers; cdp_sort re-groups the result
-# by CDP, after which the CDP-domain stages operate on *CDP* gathers.
-# Because a stage reads "the output of whichever stage is upstream of it
-# in the data it is actually processing", these keys are how a stage finds
-# its input — no stage hard-codes its predecessor's key.
-STAGE_TRACE_KEY = {
-    "shot_gathers": "traces",
-    "bandpass": "traces_bp",
-    "agc": "traces_agc",
-    "despike": "traces_despiked",
-    "trace_edit": "traces_edited",
-    "mute": "traces_muted",
-    "balance": "traces_balanced",
-    "fk": "traces_fk_filtered",
-    "mult_supp": "traces_demultiple",
-    "decon": "traces_decon",
-    "cdp_sort": "traces",              # first CDP-domain key, after re-sorting
-    "nmo1": "traces_nmo1",
-    "statics": "traces_statics",
-    "dmo": "traces_dmo",
-    "inv_nmo": "traces_inv_nmo",
-    "data_reg": "traces_regularized",
-    "nmo_final": "traces_nmo_final",
+# The KIND of data state a stage's output is (see `state_graph.KINDS`). A
+# stage that wants "the shot-domain data as it is now" asks for '@shot'
+# and gets whichever state of that kind is current — it never names the
+# stage that produced it, which is what lets operations run in any order.
+STAGE_KIND: Dict[str, str] = {
+    "upload": "raw",
+    "shot_gathers": "shot",
+    "bandpass": "shot", "agc": "shot", "despike": "shot", "trace_edit": "shot", "mute": "shot",
+    "balance": "shot", "fk": "shot", "mult_supp": "shot", "decon": "shot",
+    "cdp_sort": "cdp",
+    "vel1": "velocity", "vel2": "velocity",
+    "nmo1": "nmo", "nmo_final": "nmo",
+    "statics": "cdp", "inv_nmo": "cdp", "data_reg": "cdp",
+    "dmo": "dmo",
+    "stack": "section", "rna": "section", "decon_post": "section", "tvf": "section",
+    "migration": "image",
+    "final_scale": "final",
 }
 
-# Offsets key paired with a CDP-domain trace key (regularisation replaces
-# the per-trace offsets with a shared, synthetic offset grid).
-STAGE_OFFSETS_KEY = {"data_reg": "offsets_regularized"}
-DEFAULT_OFFSETS_KEY = "offsets"
+# Stages that start a new set of gathers (their output owns a gather
+# container; states derived from it share that container).
+ROOT_STAGES: Tuple[str, ...] = ("shot_gathers", "cdp_sort")
 
-# Stacked-section products live in the store (not per gather).
-SECTION_KEY = {
-    "stack": "stack_matrix",
-    "rna": "stack_rna",
-    "decon_post": "stack_decon_post",
-    "tvf": "stack_tvf",
-    "migration": "stack_migrated",
-    "final_scale": "stack_final",
-}
 
-# Velocity-analysis products: store key of the 2-D V(t, CDP) field, and
-# the per-gather key of that CDP's interpolated velocity curve.
-VELOCITY_FIELD_KEY = {"vel1": "Vfield_1", "vel2": "Vfield_2"}
-VELOCITY_GATHER_KEY = {"vel1": "vrms_field_vel1", "vel2": "vrms_field_vel2"}
-
-# NMO-corrected gather products that stacking can consume:
-# stage -> (trace key, live-mask key)
-NMO_PRODUCT_KEYS = {
-    "nmo_final": ("traces_nmo_final", "nmo_final_live_mask"),
-    "nmo1": ("traces_nmo1", "nmo1_live_mask"),
-}
-
-# Store-level keys a stage owns (reset to None when the stage is invalidated).
-STAGE_STORE_KEYS: Dict[str, List[str]] = {
-    "upload": ["survey"],
-    "shot_gathers": ["shot_gathers"],
-    "agc": ["agc_config"],
-    "mute": ["mute_config"],
-    "fk": ["fk_polygon", "fk_config"],
-    "cdp_sort": ["gathers", "cdp_list"],
-    "vel1": ["velocities", "Vfield_1", "analysis_1", "vel_results_1"],
-    "statics": ["shot_static", "receiver_static", "static_diag"],
-    "data_reg": ["regular_offsets"],
-    "vel2": ["Vfield_2", "analysis_2", "vel_results_2"],
-    "stack": ["stack_matrix", "fold_matrix", "naive_matrix"],
-    "rna": ["stack_rna"],
-    "decon_post": ["stack_decon_post"],
-    "tvf": ["stack_tvf"],
-    "migration": ["stack_migrated", "pstm_image", "pstm_fold"],
-    "final_scale": ["stack_final"],
-}
-
-# Per-gather keys a stage owns, inside the shot-gather or CDP-gather dicts
-# (cleared when the stage is invalidated so stale arrays never linger).
-# stage -> (container store key, per-gather keys)
-STAGE_GATHER_KEYS: Dict[str, Tuple[str, Tuple[str, ...]]] = {
-    "bandpass": ("shot_gathers", ("traces_bp",)),
-    "agc": ("shot_gathers", ("traces_agc",)),
-    "despike": ("shot_gathers", ("traces_despiked", "_spike_mask")),
-    "trace_edit": ("shot_gathers", ("traces_edited", "_kill_flags")),
-    "mute": ("shot_gathers", ("traces_muted", "_mute_times", "_surgical_box")),
-    "balance": ("shot_gathers", ("traces_balanced",)),
-    "fk": ("shot_gathers", ("traces_fk_filtered",)),
-    "mult_supp": ("shot_gathers", ("traces_demultiple",)),
-    "decon": ("shot_gathers", ("traces_decon",)),
-    "vel1": ("gathers", ("semblance_vel1", "vrms_vel1", "vrms_confidence_vel1", "vrms_field_vel1")),
-    "nmo1": ("gathers", ("traces_nmo1", "nmo1_live_mask")),
-    "statics": ("gathers", ("traces_statics",)),
-    "dmo": ("gathers", ("traces_nmo1_statics", "traces_dmo")),
-    "inv_nmo": ("gathers", ("traces_inv_nmo",)),
-    "data_reg": ("gathers", ("traces_regularized", "offsets_regularized", "live_regularized")),
-    "vel2": ("gathers", ("semblance_vel2", "vrms_vel2", "vrms_confidence_vel2", "vrms_field_vel2")),
-    "nmo_final": ("gathers", ("traces_nmo_final", "nmo_final_live_mask")),
-    "stack": ("gathers", ("stack_dmo", "fold", "stack_naive_mean")),
-}
-
-# Processing-related defaults of the data store. (The Streamlit layer adds
-# its own UI-only keys on top of these in `utils/session_state.py`.)
+# ─────────────────────────────────────────────────────────────────────────
+# 3) DATA STORE DEFAULTS
+# ─────────────────────────────────────────────────────────────────────────
+# `graph`, `containers` and `blobs` are the real state (see
+# `modules/stage_ops.py`): the graph records every data state; `containers`
+# holds the per-gather arrays of gather-based states; `blobs` the arrays of
+# everything else. All other keys below are *reference aliases* to the
+# payload of the current/latest state of each stage, refreshed after every
+# change (`stage_ops.sync_aliases`) — they cost no memory and exist so
+# the pages and tests that read e.g. `store["stack_matrix"]` keep working —
+# EXCEPT the user inputs (`manual_overrides_*`, `excluded_cdps_*`,
+# `input_picks`), which are inputs, not results.
 PROCESSING_STORE_DEFAULTS: Dict[str, Any] = {
     "survey": None,
-    "shot_gathers": None,
-    "gathers": None,
-    "cdp_list": None,
+    "graph": None,
+    "containers": {},
+    "blobs": {},
+    "input_picks": {},
+    "manual_overrides_1": {}, "manual_overrides_2": {},
+    "excluded_cdps_1": set(), "excluded_cdps_2": set(),
     "n_min_traces": cfg.N_MIN_TRACES_DEFAULT,
+    # ---- aliases of current/latest payloads (read-only for pages) ----
     "completed_stages": set(),
-    "history": [],
+    "shot_gathers": None, "gathers": None, "cdp_list": None,
     "velocities": None,
     "Vfield_1": None, "analysis_1": None, "vel_results_1": None,
     "Vfield_2": None, "analysis_2": None, "vel_results_2": None,
-    "manual_overrides_1": {}, "manual_overrides_2": {},
-    "excluded_cdps_1": set(), "excluded_cdps_2": set(),
     "shot_static": None, "receiver_static": None, "static_diag": None,
     "stack_matrix": None, "fold_matrix": None, "naive_matrix": None,
     "stack_rna": None, "stack_decon_post": None, "stack_tvf": None,
@@ -259,56 +192,29 @@ PROCESSING_STORE_DEFAULTS: Dict[str, Any] = {
     "pstm_image": None, "pstm_fold": None,
 }
 
-
-# ─────────────────────────────────────────────────────────────────────────
-# 3) PROCESSING HISTORY (execution order)
-# ─────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class HistoryEntry:
-    stage_id: str
-    label: str
-    params: Dict[str, Any]
-    timestamp: str
-    notes: str = ""
-    # --- provenance (what makes the history a record of the *data flow*) ---
-    seq: int = 0                                   # execution order, 1-based
-    consumed: Dict[str, str] = field(default_factory=dict)  # role -> upstream stage id
-    input_key: str = ""                            # data key this run read
-    output_key: str = ""                           # data key this run wrote
-    offsets_key: str = ""                          # offsets key paired with `output_key`
-    variant: str = ""                              # e.g. migration: "poststack" | "pstm"
+# The alias keys (everything above the user inputs) — cleared and rebuilt by
+# `sync_aliases`.
+ALIAS_KEYS: Tuple[str, ...] = tuple(
+    k for k in PROCESSING_STORE_DEFAULTS
+    if k not in ("survey", "graph", "containers", "blobs", "input_picks", "manual_overrides_1",
+                 "manual_overrides_2", "excluded_cdps_1", "excluded_cdps_2", "n_min_traces"))
 
 
-def log_step(history: List[HistoryEntry], stage_id: str, params: Optional[Dict[str, Any]] = None,
-             notes: str = "", *, consumed: Optional[Dict[str, str]] = None, input_key: str = "",
-             output_key: str = "", offsets_key: str = "", variant: str = "") -> List[HistoryEntry]:
-    """Append a step to the processing history.
-
-    The history is in EXECUTION order — it records what was actually done,
-    not where a stage sits in the recommended sequence. Re-running a stage
-    supersedes its previous entry (the stage is then the most recent step).
-    """
-    next_seq = max((h.seq for h in history), default=0) + 1
-    history = [h for h in history if h.stage_id != stage_id]
-    history.append(HistoryEntry(
-        stage_id=stage_id, label=stage_label(stage_id), params=params or {},
-        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notes=notes,
-        seq=next_seq, consumed=dict(consumed or {}), input_key=input_key,
-        output_key=output_key, offsets_key=offsets_key, variant=variant,
-    ))
-    return history
-
-
-def history_to_report_lines(history: List[HistoryEntry]) -> List[str]:
+def history_to_report_lines(graph) -> List[str]:
+    """The processing history as plain text lines, in creation order, with
+    the state each step consumed and produced."""
     lines = []
-    for i, h in enumerate(sorted(history, key=lambda e: e.seq), 1):
-        lines.append(f"{i}. {h.label}  ({h.timestamp})")
-        if h.consumed:
-            src = ", ".join(f"{role}←{stage_label(sid)}" for role, sid in h.consumed.items())
-            lines.append(f"     inputs: {src}")
-        for k, v in h.params.items():
+    for s in graph:
+        lines.append(f"{s.id}  {stage_label(s.op)}"
+                     + (f" ({s.variant})" if s.variant else "")
+                     + (f" v{s.version}" if s.version > 1 else "") + f"   [{s.timestamp}]")
+        if s.inputs:
+            lines.append("     consumed: " + ", ".join(f"{role}={sid}" for role, sid in s.inputs.items()))
+        lines.append(f"     fingerprint: {s.fingerprint}")
+        for k, v in s.params.items():
             lines.append(f"     {k}: {v}")
-        if h.notes:
-            lines.append(f"     note: {h.notes}")
+        for k, v in s.info.items():
+            lines.append(f"     ({k}: {v})")
+        if s.notes:
+            lines.append(f"     note: {s.notes}")
     return lines

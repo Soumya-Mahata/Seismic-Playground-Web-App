@@ -8,6 +8,7 @@ import numpy as np
 import streamlit as st
 
 from modules import segy_io
+from modules.dependencies import stale_info
 from modules.interpretation import fault_to_dataframe, horizon_to_dataframe
 from utils import io_export, session_state as ss
 from utils.formatting import human_bytes
@@ -30,10 +31,12 @@ def render():
     if survey is None:
         st.info("Load data first.", icon="ℹ️")
         return
-    cdp_list = st.session_state["cdp_list"]
     twt = survey.twt
 
-    section, section_label = ss.best_available_section()
+    section_state, section_label = ss.best_available_state()
+    section = ss.section(section_state)
+    cdp_list = (ss.cdp_list(section_state) if section_state is not None
+                else st.session_state["cdp_list"] or [])
     section_tag = _section_tag(section_label) if section_label else None
 
     tab_section, tab_picks, tab_attr, tab_report = st.tabs(
@@ -43,7 +46,13 @@ def render():
         if section is None:
             st.info("Run Stacking (or a pre-stack migration) to have a section to export.", icon="ℹ️")
         else:
-            st.caption(f"Exporting the most advanced available section: **{section_label}**.")
+            st.caption(f"Exporting the most advanced available section: **{section_label}** "
+                        f"(state {section_state.id}).")
+            stale = stale_info(ss.workflow()).get(section_state.id)
+            if stale:
+                st.warning(f"⟳ This section is out of date: {stale[0].detail} It is still exported as it "
+                            f"is — re-run the steps named above (or use *Data states* on the processing "
+                            f"pages to choose another state) if you want the latest inputs.")
             base_name = f"{survey.source_name.rsplit('.', 1)[0]}_{section_tag}"
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -97,11 +106,22 @@ def render():
             "Record length (s)": qc["record_length_s"],
             "CDP ensembles processed": len(cdp_list) if cdp_list else 0,
         }
-        report = io_export.processing_report_text(survey_info, st.session_state["history"])
+        graph = ss.graph()
+        only_this = section_state is not None and st.checkbox(
+            f"Only the states that produced the exported section ({section_state.id})", value=False)
+        report = io_export.processing_report_text(
+            survey_info, graph, state_id=section_state.id if only_this else None)
         st.text_area("Report preview", report, height=400)
         base_name = survey.source_name.rsplit(".", 1)[0]
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         col1.download_button("⬇ Report (.txt)", report.encode("utf-8"),
                               file_name=f"{base_name}_processing_report.txt", mime="text/plain")
-        col2.download_button("⬇ Parameters (.json)", io_export.params_json_bytes(st.session_state["history"]),
-                              file_name=f"{base_name}_parameters.json", mime="application/json")
+        col2.download_button("⬇ Data states (.json)", io_export.params_json_bytes(graph),
+                              file_name=f"{base_name}_states.json", mime="application/json")
+        if section_state is not None:
+            col3.download_button(f"⬇ Recipe for {section_state.id} (.json)",
+                                  io_export.recipe_json_bytes(graph, section_state.id),
+                                  file_name=f"{base_name}_{section_state.id}_recipe.json",
+                                  mime="application/json",
+                                  help="The exact operations and parameters that produce the exported "
+                                       "section from the loaded survey — replayable and fingerprint-checked.")

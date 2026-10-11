@@ -116,3 +116,11 @@ PCLIP_DEFAULT = 98.0               # percentile amplitude clip for display
 # ── Performance guardrails ───────────────────────────────────────────────
 MAX_TRACES_FULL_PROCESS = 20000    # above this, the UI nudges the user toward a windowed subset
 LARGE_DATASET_WARN_MB = 200
+
+# ── Data-state memory ────────────────────────────────────────────────────
+# Every processing state keeps its own result so any state can be re-used, compared
+# or returned to. When the payloads of all states exceed this budget, the least-
+# recently-used ones that are not the current data are released (they are re-computed
+# from their recorded operation + parameters the next time they are needed).
+# 0 = never release automatically (states can still be released by hand).
+STATE_MEMORY_BUDGET_MB = 0

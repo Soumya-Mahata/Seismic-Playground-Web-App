@@ -27,6 +27,7 @@ import streamlit as st
 
 import config as cfg
 from modules import filtering, preprocessing, stage_ops
+from modules.dependencies import state_name
 from utils import session_state as ss
 from utils import workflow_ui as wf
 from utils.click_picking import numeric_point_form
@@ -50,9 +51,9 @@ def _example_shot_selector(shot_list, key, default_shot=None):
         format_func=lambda ffid: f"Shot {shot_list.index(ffid) + 1} of {n}  (FFID {ffid})")
 
 
-def _before_label(entry) -> str:
-    """'Before — Raw' / 'Before — AGC': what this run actually read."""
-    return f"Before — {wf.input_name(entry)}"
+def _before_label(res) -> str:
+    """'Before — Raw (S1)' / 'Before — AGC (S2)': the state this run actually read."""
+    return res.before_label
 
 
 def render():
@@ -73,13 +74,13 @@ def render():
     twt = survey.twt
 
     wf.data_state_caption("shot", "Current shot-domain data")
-    wf.stale_banner(["cdp_sort"])
+    wf.stale_banner(wf.stale_for_ops(["cdp_sort"]))
     with st.expander("Status of every step on this page"):
         rows = [r for r in wf.status_rows() if r["stage"] in SHOT_STAGES]
         st.dataframe(pd.DataFrame([{
             "step": r["label"], "status": r["level"].badge, "done": "✅" if r["done"] else "",
             "note": r["note"]} for r in rows]), hide_index=True)
-    wf.undo_panel(SHOT_STAGES, "undo_shot")
+    wf.states_panel(["shot"], "states_shot", "🗂 Shot-domain data states · undo · redo")
 
     n_traces_in_shots = sum(g["traces"].shape[0] for g in shot_gathers.values())
     fn_info = getattr(survey, "field_noise_info", None) or {}
@@ -138,16 +139,17 @@ def render():
         high_slope = c2.slider("High-cut taper width (Hz)", 1.0, 30.0, cfg.HIGH_SLOPE_DEFAULT, key="bp_highslope")
         if wf.run_button("bandpass", "Run band-pass filter", key="run_bp"):
             wf.execute(stage_ops.run_bandpass, fmin, fmax, low_slope, high_slope)
-        if ss.is_stage_done("bandpass"):
-            e = ss.entry("bandpass")
+        e = wf.result("bandpass")
+        if e is not None:
+            wf.result_note(e)
             st.success("✅ Band-pass filter applied.")
             shot = _example_shot_selector(shot_list, "bp_shot")
-            g = shot_gathers[shot]
+            g = e.gathers[shot]
             st.plotly_chart(spectra_plots.plot_spectrum_comparison(
-                g[e.input_key], g["traces_bp"], dt, title="Spectrum — Band-Pass Filter"), theme=None, key="bp_spectrum")
+                g[e.in_key], g[e.out_key], dt, title="Spectrum — Band-Pass Filter"), theme=None, key="bp_spectrum")
             disp = controls.section_display_controls("bp_display", default_colorscale="Seismic")
             st.plotly_chart(seismic_plots.plot_before_after(
-                g[e.input_key], g["traces_bp"], g["receiver_ids"], twt,
+                g[e.in_key], g[e.out_key], g["receiver_ids"], twt,
                 title_before=_before_label(e), title_after="After band-pass", x_title="Receiver station",
                 colorscale=disp.colorscale, equalize=disp.equalize),
                 theme=None, key="bp_before_after")
@@ -159,14 +161,15 @@ def render():
             "(spherical divergence + intrinsic attenuation). The scalar driving the gain can be "
             "computed three ways — **mean**, **RMS**, and **median** AGC — which normally "
             "produce similar but not identical results. Compare all three below on an "
-            "example shot, then pick the one to use; only **one** version is "
-            "ever active downstream — no hidden second copy.")
+            "example shot, then pick the one to use. The result is a new data state; the next step "
+            "reads whichever state is current — running AGC again with another mode adds a state "
+            "rather than replacing this one.")
         chk = wf.show_status("agc")
         if chk.can_run:
-            in_key = wf.input_key(chk)
+            pg, in_key, _ = wf.input_gathers(chk)
             window = st.slider("AGC window (samples)", 20, 800, cfg.AGC_WINDOW_DEFAULT, key="agc_window")
             shot_preview = _example_shot_selector(shot_list, "agc_preview_shot")
-            g_preview = shot_gathers[shot_preview]
+            g_preview = pg[shot_preview]
             previews = {m: preprocessing.agc(g_preview[in_key], window=window, mode=m)
                         for m in ("mean", "rms", "median")}
 
@@ -189,16 +192,17 @@ def render():
 
             if wf.run_button("agc", f"Apply {mode.upper()} AGC to all shots", key="run_agc"):
                 wf.execute(stage_ops.run_agc, window, mode)
-            if ss.is_stage_done("agc"):
-                e = ss.entry("agc")
-                cfg_active = st.session_state.get("agc_config") or {}
+            e = wf.result("agc")
+            if e is not None:
+                wf.result_note(e)
+                cfg_active = e.params
                 st.success(f"✅ Amplitude recovery applied — **active version: {cfg_active.get('mode', '?').upper()} "
                             f"AGC, window={cfg_active.get('window', '?')} samples**. It also appears in the "
                             f"sidebar for the rest of the workflow.")
                 shot = _example_shot_selector(shot_list, "agc_shot")
-                g = shot_gathers[shot]
+                g = e.gathers[shot]
                 st.plotly_chart(seismic_plots.plot_before_after(
-                    g[e.input_key], g["traces_agc"], g["receiver_ids"], twt,
+                    g[e.in_key], g[e.out_key], g["receiver_ids"], twt,
                     title_before=_before_label(e), title_after=f"After {cfg_active.get('mode', '?').upper()} AGC",
                     x_title="Receiver station", colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="agc_before_after")
@@ -216,22 +220,23 @@ def render():
         spike_thresh = c2.slider("De-spike threshold (x robust noise level)", 3.0, 15.0, 6.0, key="spike_thresh")
         if wf.run_button("despike", "Run de-spike", key="run_despike"):
             wf.execute(stage_ops.run_despike, spike_window, spike_thresh)
-        if ss.is_stage_done("despike"):
-            e = ss.entry("despike")
-            st.success(f"✅ De-spike applied — {e.params.get('samples_flagged', 0)} sample(s) "
+        e = wf.result("despike")
+        if e is not None:
+            wf.result_note(e)
+            st.success(f"✅ De-spike applied — {e.info.get('samples_flagged', 0)} sample(s) "
                         f"flagged and replaced across all shots.")
             shot = _example_shot_selector(shot_list, "despike_shot", default_shot=default_spike_shot)
-            g = shot_gathers[shot]
-            n_spikes_shot = int(g["_spike_mask"].sum())
+            g = e.gathers[shot]
+            n_spikes_shot = int(g[e.key("spike_mask")].sum())
             st.caption(f"{n_spikes_shot} spike sample(s) flagged in shot {shot} "
                         f"(marked below with ×).")
             disp = controls.section_display_controls("despike_display", default_colorscale="Seismic")
             fig = seismic_plots.plot_before_after(
-                g[e.input_key], g["traces_despiked"], g["receiver_ids"], twt,
+                g[e.in_key], g[e.out_key], g["receiver_ids"], twt,
                 title_before=_before_label(e), title_after="After de-spike", x_title="Receiver station",
                 colorscale=disp.colorscale, equalize=disp.equalize)
             if n_spikes_shot:
-                rows, cols = np.nonzero(g["_spike_mask"])
+                rows, cols = np.nonzero(g[e.key("spike_mask")])
                 fig.add_trace(go.Scatter(x=g["receiver_ids"][rows], y=twt[cols], mode="markers",
                                           marker=dict(symbol="x", size=6, color="#f59e0b"),
                                           name="Flagged spikes", showlegend=True), row=1, col=2)
@@ -249,22 +254,23 @@ def render():
             "channels. The resulting kill mask is then applied to the data actually being processed.")
         chk = wf.show_status("trace_edit")
         if chk.can_run:
-            chain = ss.workflow().data_ancestry(chk.inputs["data"])
-            det_stage = stage_ops.kill_detection_stage(chain)
-            st.caption(f"Detection will measure: **{wf.SHORT.get(det_stage, det_stage)}** data · "
+            lineage = ss.graph().lineage(chk.inputs["data"])
+            det_state = lineage[stage_ops.kill_detection_index([x.op for x in lineage])]
+            st.caption(f"Detection will measure: **{state_name(det_state)}** data · "
                         f"the mask will be applied to: **{wf.input_name(chk)}** data.")
             c1, c2 = st.columns(2)
             dead_frac = c1.slider("Dead-trace energy threshold (x median)", 0.001, 0.5, 0.02, key="dead_frac")
             noisy_mult = c2.slider("Noisy-trace energy threshold (x median)", 2.0, 30.0, 8.0, key="noisy_mult")
             if wf.run_button("trace_edit", "Run trace kill", key="run_kill"):
                 wf.execute(stage_ops.run_trace_kill, dead_frac, noisy_mult)
-            if ss.is_stage_done("trace_edit"):
-                e = ss.entry("trace_edit")
-                st.success(f"✅ Trace kill applied — {e.params.get('traces_killed', 0)} "
-                            f"trace(s) zeroed across all shots (detected on: {e.params.get('detected_on', '?')}).")
+            e = wf.result("trace_edit")
+            if e is not None:
+                wf.result_note(e)
+                st.success(f"✅ Trace kill applied — {e.info.get('traces_killed', 0)} "
+                            f"trace(s) zeroed across all shots (detected on: {e.info.get('detected_on', '?')}).")
                 shot = _example_shot_selector(shot_list, "edit_shot", default_shot=default_edit_shot)
-                g = shot_gathers[shot]
-                flags = g["_kill_flags"]
+                g = e.gathers[shot]
+                flags = g[e.key("kill_flags")]
                 c1, c2 = st.columns(2)
                 c1.metric("Dead traces (this shot)", int(flags["dead"].sum()))
                 c2.metric("Noisy traces (this shot)", int(flags["noisy"].sum()))
@@ -282,13 +288,13 @@ def render():
                     energy_fig.add_hline(y=float(np.median(flags["energy"])), line_dash="dash",
                                           annotation_text="median")
                     energy_fig.update_layout(**theme.base_layout(
-                        f"Per-trace energy ({e.params.get('detected_on', '?')}) — red=dead, orange=noisy, blue=kept", 320))
+                        f"Per-trace energy ({e.info.get('detected_on', '?')}) — red=dead, orange=noisy, blue=kept", 320))
                     energy_fig.update_xaxes(**theme.x_axis("Receiver station"))
                     energy_fig.update_yaxes(**theme.x_axis("Energy"), type="log")
                     st.plotly_chart(energy_fig, theme=None, key="kill_energy_bar")
                 disp2 = controls.section_display_controls("kill_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
-                    g[e.input_key], g["traces_edited"], g["receiver_ids"], twt,
+                    g[e.in_key], g[e.out_key], g["receiver_ids"], twt,
                     title_before=_before_label(e), title_after="After kill (killed traces now flat)",
                     x_title="Receiver station", colorscale=disp2.colorscale, equalize=disp2.equalize),
                     theme=None, key="edit_before_after")
@@ -311,7 +317,7 @@ def render():
         )
         chk = wf.show_status("mute")
         if chk.can_run:
-            in_key = wf.input_key(chk)
+            pg, in_key, _ = wf.input_gathers(chk)
             mute_type = st.radio("Mute type", ["Top mute (follows direct-arrival moveout)",
                                                   "Top mute (flat — simpler, not offset-aware)",
                                                   "Surgical mute (remove a noisy box region)"],
@@ -335,7 +341,7 @@ def render():
                             "around a localized noise burst visible on the QC plot for an example "
                             "shot below.")
                 shot_sm = _example_shot_selector(shot_list, "surgical_preview_shot")
-                g_sm = shot_gathers[shot_sm]
+                g_sm = pg[shot_sm]
                 max_off = float(np.max(np.abs(g_sm["offsets"])))
                 c1, c2 = st.columns(2)
                 x_range = c1.slider("Offset range (m, absolute)", 0.0, max_off, (0.0, max_off * 0.3),
@@ -359,26 +365,29 @@ def render():
                 kind = mute_kwargs.pop("kind")
                 wf.execute(stage_ops.run_mute, kind, **mute_kwargs)
 
-            if ss.is_stage_done("mute"):
-                e = ss.entry("mute")
-                mcfg = st.session_state["mute_config"]
+            e = wf.result("mute")
+
+            if e is not None:
+
+                wf.result_note(e)
+                mcfg = {**e.params, "summary": e.info["summary"]}
                 st.success(f"✅ Mute applied — **active mute: {mcfg['summary']}**.")
                 shot = _example_shot_selector(shot_list, "mute_shot")
-                g = shot_gathers[shot]
+                g = e.gathers[shot]
                 disp = controls.section_display_controls("mute_display", default_colorscale="Seismic")
                 if mcfg["kind"] in ("flat", "linear"):
                     st.markdown("**Before, with the mute cutoff line overlaid** — everything below/right "
                                  "of the dashed line is removed.")
                     st.plotly_chart(seismic_plots.plot_mute_qc(
-                        g[e.input_key], g["receiver_ids"], twt, g["_mute_times"],
+                        g[e.in_key], g["receiver_ids"], twt, g[e.key("mute_times")],
                         title="Before mute (cutoff overlaid)", x_title="Receiver station",
                         colorscale=disp.colorscale, equalize=disp.equalize),
                         theme=None, key="mute_qc_overlay")
                 else:
                     st.markdown(f"**Before, with the surgical mute box overlaid** "
-                                 f"({int(np.sum(g['_surgical_box']))} of {len(g['_surgical_box'])} "
+                                 f"({int(np.sum(g[e.key('surgical_box')]))} of {len(g[e.key('surgical_box')])} "
                                  f"traces in this shot fall inside the chosen offset range).")
-                    fig_box = seismic_plots.plot_section(g[e.input_key], g["offsets"], twt,
+                    fig_box = seismic_plots.plot_section(g[e.in_key], g["offsets"], twt,
                                                            title="Before mute (box overlaid)",
                                                            x_title="Offset (m)", colorscale=disp.colorscale,
                                                            equalize=disp.equalize)
@@ -390,7 +399,7 @@ def render():
                                         line=dict(color="#ef4444", width=2), fillcolor="rgba(239,68,68,0.15)")
                     st.plotly_chart(fig_box, theme=None, key="mute_qc_overlay")
                 st.plotly_chart(seismic_plots.plot_before_after(
-                    g[e.input_key], g["traces_muted"],
+                    g[e.in_key], g[e.out_key],
                     g["offsets"] if mcfg["kind"] == "surgical" else g["receiver_ids"], twt,
                     title_before=_before_label(e), title_after="After mute",
                     x_title="Offset (m)" if mcfg["kind"] == "surgical" else "Receiver station",
@@ -406,14 +415,15 @@ def render():
                            min(cfg.NORM_WINDOW_S_DEFAULT, survey.record_length), key="bal_ref")
         if wf.run_button("balance", "Run trace balancing", key="run_bal"):
             wf.execute(stage_ops.run_balance, ref_s)
-        if ss.is_stage_done("balance"):
-            e = ss.entry("balance")
+        e = wf.result("balance")
+        if e is not None:
+            wf.result_note(e)
             st.success("✅ Trace balancing applied.")
             shot = _example_shot_selector(shot_list, "bal_shot")
-            g = shot_gathers[shot]
+            g = e.gathers[shot]
             disp = controls.section_display_controls("bal_display", default_colorscale="Seismic")
             st.plotly_chart(seismic_plots.plot_before_after(
-                g[e.input_key], g["traces_balanced"], g["receiver_ids"], twt,
+                g[e.in_key], g[e.out_key], g["receiver_ids"], twt,
                 title_before=_before_label(e), title_after="After balancing", x_title="Receiver station",
                 colorscale=disp.colorscale, equalize=disp.equalize),
                 theme=None, key="bal_before_after")
@@ -435,9 +445,9 @@ def render():
         )
         chk = wf.show_status("fk")
         if chk.can_run:
-            in_key = wf.input_key(chk)
+            pg, in_key, _ = wf.input_gathers(chk)
             shot_fk = _example_shot_selector(shot_list, "fk_preview_shot")
-            g_preview = shot_gathers[shot_fk]
+            g_preview = pg[shot_fk]
             f_nyq, k_nyq = 0.5 / dt, 0.5 / survey.group_interval
             st.caption(f"This survey's actual F-K domain: k = ±{k_nyq:.3f} cycles/m "
                        f"(station spacing {survey.group_interval:.2f} m), f = 0–{f_nyq:.0f} Hz. "
@@ -625,24 +635,27 @@ def render():
                 wf.execute(stage_ops.run_fk, active_polygon, polygon_mode, float(reject_coeff), poly_desc,
                            lambda f: prog.progress(min(1.0, f), text="F-K filtering gathers..."))
 
-            if ss.is_stage_done("fk"):
-                e = ss.entry("fk")
-                fkc = st.session_state.get("fk_config") or {}
+            e = wf.result("fk")
+
+            if e is not None:
+
+                wf.result_note(e)
+                fkc = {"mode": e.params["mode"], "coeff": e.params["coeff"], "source": e.info.get("source", "")}
                 st.success(f"✅ F-K filter applied — {fkc.get('mode', '?')} polygon, "
                             f"{fkc.get('source', '')}, attenuation coefficient {fkc.get('coeff', 0):.3f}.")
                 shot = _example_shot_selector(shot_list, "fk_shot")
-                g = shot_gathers[shot]
+                g = e.gathers[shot]
                 _, _, f_ax2, k_ax2, fk_b, fk_a = filtering.fk_filter_gather(
-                    g[e.input_key], dt, survey.group_interval, st.session_state["fk_polygon"],
+                    g[e.in_key], dt, survey.group_interval, e.params["polygon"],
                     polygon_mode=fkc.get("mode", "accept"),
                     reject_coefficient=fkc.get("coeff", cfg.FK_REJECT_COEFFICIENT_DEFAULT))
                 st.plotly_chart(seismic_plots.plot_fk_before_after(
-                    f_ax2, k_ax2, np.abs(fk_b), np.abs(fk_a), polygon_points=st.session_state["fk_polygon"],
+                    f_ax2, k_ax2, np.abs(fk_b), np.abs(fk_a), polygon_points=e.params["polygon"],
                     polygon_mode=fkc.get("mode", "accept")),
                     theme=None, key="fk_spectrum_before_after")
                 disp = controls.section_display_controls("fk_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
-                    g[e.input_key], g["traces_fk_filtered"], g["receiver_ids"], twt,
+                    g[e.in_key], g[e.out_key], g["receiver_ids"], twt,
                     title_before=_before_label(e), title_after="After F-K", x_title="Receiver station",
                     colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="fk_before_after")
@@ -650,7 +663,7 @@ def render():
                              "ground-roll / direct-wave trend and contain no reflection hyperbolas; "
                              "if reflections appear here the polygon is cutting into the signal.")
                 st.plotly_chart(seismic_plots.plot_section(
-                    g[e.input_key] - g["traces_fk_filtered"], g["receiver_ids"], twt,
+                    g[e.in_key] - g[e.out_key], g["receiver_ids"], twt,
                     title="Removed by F-K filter", x_title="Receiver station",
                     colorscale=disp.colorscale, pclip=disp.pclip, equalize=disp.equalize),
                     theme=None, key="fk_removed")
@@ -667,10 +680,10 @@ def render():
                      "zero-crossing* of the autocorrelation.")
         chk = wf.show_status("mult_supp")
         if chk.can_run:
-            in_key = wf.input_key(chk)
+            pg, in_key, _ = wf.input_gathers(chk)
             shot_ms = _example_shot_selector(shot_list, "ms_suggest_shot")
             suggested_lag_s = preprocessing.second_zero_crossing_lag(
-                shot_gathers[shot_ms][in_key][0], dt)
+                pg[shot_ms][in_key][0], dt)
             st.caption(f"Suggested prediction lag for shot {shot_ms}, trace 0: "
                         f"≈{suggested_lag_s * 1000:.1f} ms ({int(round(suggested_lag_s / dt))} samples)")
             c1, c2, c3 = st.columns(3)
@@ -688,14 +701,15 @@ def render():
                 prog = st.progress(0.0, text="Suppressing multiples...")
                 wf.execute(stage_ops.run_mult_supp, oplen, lag_samples, pw,
                            lambda f: prog.progress(min(1.0, f), text="Suppressing multiples..."))
-            if ss.is_stage_done("mult_supp"):
-                e = ss.entry("mult_supp")
+            e = wf.result("mult_supp")
+            if e is not None:
+                wf.result_note(e)
                 st.success("✅ Multiple suppression applied.")
                 shot = _example_shot_selector(shot_list, "ms_shot")
-                g = shot_gathers[shot]
+                g = e.gathers[shot]
                 disp = controls.section_display_controls("ms_display", default_colorscale="Seismic")
                 st.plotly_chart(seismic_plots.plot_before_after(
-                    g[e.input_key], g["traces_demultiple"], g["receiver_ids"], twt,
+                    g[e.in_key], g[e.out_key], g["receiver_ids"], twt,
                     title_before=_before_label(e), title_after="After multiple suppression",
                     x_title="Receiver station", colorscale=disp.colorscale, equalize=disp.equalize),
                     theme=None, key="ms_before_after")
@@ -713,18 +727,19 @@ def render():
             prog = st.progress(0.0, text="Deconvolving gathers...")
             wf.execute(stage_ops.run_decon, oplen, pw,
                        lambda f: prog.progress(min(1.0, f), text="Deconvolving gathers..."))
-        if ss.is_stage_done("decon"):
-            e = ss.entry("decon")
+        e = wf.result("decon")
+        if e is not None:
+            wf.result_note(e)
             st.success("✅ Deconvolution applied. Continue to **CDP Sort & Binning** whenever the "
                         "conditioning you want is done.")
             shot = _example_shot_selector(shot_list, "decon_shot")
-            g = shot_gathers[shot]
+            g = e.gathers[shot]
             disp = controls.section_display_controls("decon_display", default_colorscale="Seismic")
             st.plotly_chart(seismic_plots.plot_before_after(
-                g[e.input_key], g["traces_decon"], g["receiver_ids"], twt,
+                g[e.in_key], g[e.out_key], g["receiver_ids"], twt,
                 title_before=_before_label(e), title_after="After decon", x_title="Receiver station",
                 colorscale=disp.colorscale, equalize=disp.equalize),
                 theme=None, key="decon_before_after")
             st.plotly_chart(spectra_plots.plot_spectrum_comparison(
-                g[e.input_key], g["traces_decon"], dt, label_before="Before", label_after="After",
+                g[e.in_key], g[e.out_key], dt, label_before="Before", label_after="After",
                 title="Spectrum — Deconvolution whitens the passband"), theme=None, key="decon_spectrum")

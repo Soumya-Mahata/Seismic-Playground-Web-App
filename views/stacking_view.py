@@ -6,6 +6,7 @@ import numpy as np
 import streamlit as st
 
 from modules import stage_ops
+from modules.dependencies import state_name
 from utils import session_state as ss
 from utils import workflow_ui as wf
 from visualization import controls, seismic_plots
@@ -21,12 +22,10 @@ def render():
     if not chk.can_run:
         return
 
-    gathers = st.session_state["gathers"]
-    cdp_list = st.session_state["cdp_list"]
     survey = st.session_state["survey"]
     twt = survey.twt
     st.caption(f"Will stack: **{wf.input_name(chk)}** gathers.")
-    wf.stale_banner(["stack", "rna", "decon_post", "tvf", "migration", "final_scale"])
+    wf.stale_banner(wf.stale_for_ops(["stack", "rna", "decon_post", "tvf", "migration", "final_scale"]))
 
     st.markdown("Fold-normalized stacking sums the live (non-muted) NMO-corrected traces at each "
                  "CDP and divides by the *live* fold at each time sample — not the nominal trace "
@@ -36,15 +35,20 @@ def render():
         with st.spinner("Stacking..."):
             wf.execute(stage_ops.run_stack)
 
-    if not ss.is_stage_done("stack"):
+    wf.states_panel(["section"], "states_section", "🗂 Stacked / post-stack data states · undo · redo")
+
+    e = wf.result("stack")
+    if e is None:
         return
 
-    stack_matrix = st.session_state["stack_matrix"]
-    fold_matrix = st.session_state["fold_matrix"]
-    naive_matrix = st.session_state["naive_matrix"]
-    st.success(f"✅ Stack complete — stacked the {wf.input_name(ss.entry('stack'))} gathers.")
+    wf.result_note(e)
+    cdp_list = ss.cdp_list(e.state)
+    stack_matrix = ss.blob(e.state, "section")
+    fold_matrix = ss.blob(e.state, "fold")
+    naive_matrix = ss.blob(e.state, "naive")
+    st.success(f"✅ Stack complete — **{e.name}**, stacked the {state_name(e.src)} gathers.")
 
-    fold_per_cdp = np.array([g["fold"].max() for g in gathers.values()])
+    fold_per_cdp = fold_matrix.max(axis=1)   # live fold per CDP (rows of the fold matrix)
     st.plotly_chart(seismic_plots.plot_fold_map(fold_per_cdp, cdp_list), theme=None, key="stacking_view_chart_2001")
 
     st.markdown("**Display controls**")

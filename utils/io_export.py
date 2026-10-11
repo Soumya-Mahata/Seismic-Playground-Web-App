@@ -12,14 +12,15 @@ from __future__ import annotations
 import io
 import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
 from modules import segy_io
-from modules.pipeline import HistoryEntry, history_to_report_lines
+from modules.pipeline import history_to_report_lines
+from modules.state_graph import ProcessingGraph
 import config as cfg
 
 
@@ -57,8 +58,10 @@ def figure_html_bytes(fig: go.Figure) -> bytes:
     return fig.to_html(include_plotlyjs="cdn").encode("utf-8")
 
 
-def processing_report_text(survey_info: dict, history: List[HistoryEntry],
-                            extra_notes: str = "") -> str:
+def processing_report_text(survey_info: dict, graph: ProcessingGraph, extra_notes: str = "",
+                            state_id: Optional[str] = None) -> str:
+    """The processing report. `graph` is the session's `ProcessingGraph`; with
+    `state_id` only the states that data was built from are listed."""
     lines = [
         "=" * 70,
         f"{cfg.APP_TITLE.upper()} — PROCESSING REPORT",
@@ -70,8 +73,17 @@ def processing_report_text(survey_info: dict, history: List[HistoryEntry],
     ]
     for k, v in survey_info.items():
         lines.append(f"{k}: {v}")
-    lines += ["", "PROCESSING STEPS APPLIED (in the order they were executed)", "-" * 70]
-    lines += history_to_report_lines(history) or ["  (no steps recorded)"]
+    if state_id is None:
+        lines += ["", "DATA STATES (in the order they were produced; each records the state(s) it "
+                      "consumed, its operation and parameters)", "-" * 70]
+        lines += history_to_report_lines(graph) or ["  (no steps recorded)"]
+    else:
+        keep = {s.id for s in graph.ancestors(state_id)} | {state_id}
+        lines += ["", f"DATA STATES THAT PRODUCED {state_id} (in the order they were produced)", "-" * 70]
+        sub = ProcessingGraph.__new__(ProcessingGraph)
+        sub.__dict__.update(graph.__dict__)
+        sub._states = {k: v for k, v in graph._states.items() if k in keep}
+        lines += history_to_report_lines(sub) or ["  (no steps recorded)"]
     if extra_notes:
         lines += ["", "NOTES", "-" * 70, extra_notes]
     lines += ["", "=" * 70,
@@ -82,14 +94,18 @@ def processing_report_text(survey_info: dict, history: List[HistoryEntry],
     return "\n".join(lines)
 
 
-def params_json_bytes(history: List[HistoryEntry]) -> bytes:
-    """Processing history as JSON, in the order the steps were *executed*
-    (`order`), with which upstream outputs each step consumed — the data
-    lineage, which is what makes a non-standard processing order
-    reproducible."""
-    payload = [{"order": h.seq, "stage": h.stage_id, "variant": h.variant or None, "label": h.label,
-                "timestamp": h.timestamp, "consumed": dict(h.consumed),
-                "input": h.input_key or None, "output": h.output_key or None,
-                "params": h.params, "notes": h.notes}
-               for h in sorted(history, key=lambda e: e.seq)]
-    return json.dumps(payload, indent=2, default=str).encode("utf-8")
+def params_json_bytes(graph: ProcessingGraph) -> bytes:
+    """The whole processing graph as JSON: every data state with the state(s) it
+    consumed, its operation, complete parameters, lineage fingerprint and
+    diagnostics, plus which state is current for each kind of data and the
+    event log (undo / redo / select / discard). No arrays."""
+    return json.dumps(graph.export(), indent=2, default=str).encode("utf-8")
+
+
+def recipe_json_bytes(graph: ProcessingGraph, state_id: str) -> bytes:
+    """The minimal, replayable recipe for one state: exactly the operations (with
+    parameters and which recorded state each consumed) that produce it from the
+    loaded survey. `stage_ops.replay_recipe` re-runs it and checks the lineage
+    fingerprints."""
+    return json.dumps({"target": state_id, "steps": graph.recipe(state_id)}, indent=2,
+                      default=str).encode("utf-8")

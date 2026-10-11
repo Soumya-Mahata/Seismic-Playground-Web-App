@@ -99,11 +99,24 @@ available (see "Synthetic test data" below).
   Every step shows **✓ Available / ⚠ Recommended prerequisite not
   performed / ⛔ Required input missing**; a ⚠ asks *Continue?* and never
   blocks. See [`docs/DEPENDENCY_MODEL.md`](docs/DEPENDENCY_MODEL.md).
-- **Processing history** — every step is logged in the order it was
-  *executed*, with its parameters and which earlier outputs it consumed.
-  Re-running a step discards only the steps built on its output (so the
-  history can never silently go stale, but unrelated later-in-the-list
-  steps are kept).
+- **Data states, not a pipeline position** — every operation is
+  `INPUT STATE → OPERATION + PARAMETERS → OUTPUT STATE`
+  (`S1 ─AGC(500)→ S2 ─Band-pass(8–60)→ S3 ─Mute→ S4`). The app knows which
+  state each step consumed and produced, keeps every state (nothing is
+  overwritten), and gives each a stable id (`S7`) and a lineage
+  fingerprint. That makes steps repeatable, order-independent and
+  skippable; lets you run a step on an *earlier* state to branch;
+  flags states built from superseded inputs as **⟳ stale** instead of
+  discarding them; and gives **undo / redo**, a full history and a
+  replayable **recipe** (re-run the recorded steps on the same survey and
+  check the fingerprints). An identical re-run reuses the existing state;
+  new states add one array per gather and never copy their input, and old
+  states can be freed and re-computed on demand. See "Data-state model" in
+  [`CLAUDE.md`](CLAUDE.md).
+- **Processing history** — every state is listed in the order it was
+  *produced* with its operation, parameters, the state(s) it consumed and
+  any ⚠ it went ahead despite; exported as a report, as JSON, and as a
+  replayable recipe for any one state.
 
 ---
 
@@ -238,11 +251,15 @@ seismic-playground/
 │   │                           #   sweetness, variance, coherence + Petrel color map
 │   ├── interpretation.py      # horizon/fault data model, curvature, LAS reading,
 │   │                           #   statistical wavelet extraction, well-tie
-│   ├── pipeline.py            # recommended-order stage registry + processing history
+│   ├── pipeline.py            # recommended-order stage registry, STAGE_KIND, store defaults
+│   ├── state_graph.py         # DataState + ProcessingGraph: INPUT STATE → OPERATION + PARAMETERS
+│   │                           #   → OUTPUT STATE; ids, fingerprints, current pointers, lineage,
+│   │                           #   undo/redo, discard, recipe — pure Python, no arrays
 │   ├── dependencies.py        # dependency engine: genuine needs (⛔) vs recommendations (⚠),
-│   │                           #   data streams, provenance, invalidation — pure Python
-│   ├── stage_ops.py           # one executor per stage (calls the maths above, records
-│   │                           #   provenance); used by the pages and by the tests
+│   │                           #   input resolution, stale-state detection — pure Python
+│   ├── stage_ops.py           # execute() + one executor per operation (calls the maths above,
+│   │                           #   stores the payloads, memoises, releases/re-computes memory,
+│   │                           #   replays recipes); used by the pages and by the tests
 │   └── validation.py          # friendly input/parameter validation, DependencyError
 ├── visualization/              # Plotly figure builders — no Streamlit dependency
 │   ├── theme.py                 # shared style tokens (forced-white plot background)
@@ -256,14 +273,16 @@ seismic-playground/
 │   ├── poststack_view.py, migration_view.py, interpretation_view.py,
 │   ├── attributes_view.py, export_view.py
 ├── utils/
-│   ├── session_state.py        # session-state schema + thin adapter over the dependency engine
-│   ├── workflow_ui.py          # ✓/⚠/⛔ banners, "Continue?" run button, status panels, undo/reorder
+│   ├── session_state.py        # session-state schema + thin adapter over the state graph
+│   ├── workflow_ui.py          # ✓/⚠/⛔ banners, "Continue?" run button, input-state picker,
+│   │                             #   data-states panel (undo/redo/make current/free/discard)
 │   ├── click_picking.py        # shared numeric-entry picking helper (velocity, horizon,
 │   │                             #   fault, F-K polygon all use this one mechanism)
-│   ├── io_export.py            # SEG-Y/CSV/NumPy/HTML/report export helpers
+│   ├── io_export.py            # SEG-Y/CSV/NumPy/HTML/report, state-graph JSON, recipe JSON
 │   └── formatting.py
 ├── data/sample_data/            # shipped synthetic demo SEG-Y
-├── docs/DEPENDENCY_MODEL.md     # the dependency model, in full
+├── docs/DEPENDENCY_MODEL.md     # the ⛔/⚠ dependency rules, in full
+├── CLAUDE.md                    # contributor guide, incl. the data-state model
 ├── tests/                       # see "Testing" below
 ├── requirements.txt, .gitignore, .streamlit/config.toml
 ```
@@ -289,19 +308,24 @@ seismic-playground/
   Streamlit setting. Plotly figures are separately forced to a
   consistent white background in `visualization/theme.py`, since a plot
   that inherits the app's dark background loses most colormaps' contrast.
-- **Recommended order ≠ required inputs ≠ data state ≠ history.** These
+- **Recommended order ≠ required inputs ≠ data states ≠ history.** These
   used to be one hard-coded chain (`require_stage` + "stage N done clears
   every later stage"). They are now separate: `pipeline.PIPELINE_STAGES`
   is only the recommended order; `dependencies.STAGE_SPECS` declares each
-  stage's genuine `Need`s and its `Advice`; the data state and the
-  history are derived from one provenance log (each run records what it
-  consumed). Pages call `stage_ops.run_*`, which refuse (`DependencyError`)
-  only when a genuine input is missing. Full write-up:
-  [`docs/DEPENDENCY_MODEL.md`](docs/DEPENDENCY_MODEL.md).
+  operation's genuine `Need`s and its `Advice`; and what data *exists* is a
+  graph of states (`modules/state_graph.py`) in which every operation
+  records the state(s) it consumed, its parameters and the state it
+  produced. Pages call `stage_ops.run_*`, which refuse (`DependencyError`)
+  only when a genuine input is missing. Rules: [`docs/DEPENDENCY_MODEL.md`](docs/DEPENDENCY_MODEL.md);
+  state model: [`CLAUDE.md`](CLAUDE.md).
 - **Shot domain first, CDP domain second.** `gathers` (CDP-indexed) and
-  `shot_gathers` (shot-indexed) are both dicts of per-gather dicts that
-  accumulate keys as data flows through the pipeline (`traces` →
-  `traces_bp` → `traces_agc` → …). Pre-stack conditioning runs entirely
+  `shot_gathers` (shot-indexed) are both dicts of per-gather dicts. The
+  base set owns the native arrays (`traces`, `offsets` …); each processing
+  state adds its own under a key carrying its id (`traces@S3`,
+  `traces@S4` …), so a new state costs one array per gather and never
+  copies its input. (`gathers`, `shot_gathers`, `stack_matrix`,
+  `Vfield_1` … remain as read-only references to the current state's
+  arrays.) Pre-stack conditioning runs entirely
   on `shot_gathers`; CDP sort/binning (`modules/segy_io.scatter_to_flat`
   + `build_cdp_gathers(..., data_override=...)`) re-groups the
   *conditioned* samples by CDP afterward, using the survey's own headers
@@ -399,7 +423,7 @@ timing shift regardless of where in the chain deconvolution runs — this
 is a property of that mismatch, not an ordering-induced bug. See
 `tests/manual_pipeline_check.py` for the reproducible comparison.
 
-### 5. Recommendations warn; only missing inputs block
+### 5. Recommendations warn; only missing inputs block; states are never overwritten
 
 A step that is normally done earlier but wasn't (AGC without band-pass,
 CDP sort without any conditioning, DMO before statics …) gets a ⚠ with
@@ -407,15 +431,21 @@ the reason and a *Continue?* prompt; running steps in a non-standard order
 is allowed and recorded. Things that are genuinely impossible are ⛔
 — e.g. stacking un-flattened gathers, NMO with no velocity function, or
 residual statics on regularised gathers (which no longer carry each
-trace's own shot/receiver). Re-ordering two finished steps is "discard
-one, then run them in the order you want": a result cannot be un-applied
-from the middle of a chain without redoing what came after. Because
-every executor reads the *current head* of its data stream rather than a
-fixed predecessor, a step's input is whatever was actually applied last —
-and trace-kill detection deliberately measures amplitude-preserving data
-from before any AGC/balancing so its result does not depend on that
-order. With the recommended order the results are bit-for-bit identical
-to the previous (linear) version.
+trace's own shot/receiver).
+
+Every operation reads the *current state* of its kind of data (or any
+state you name) and produces a **new state**; nothing is overwritten.
+That is what makes the rest simple: running a step twice gives
+`AGC v2` (with a ⚠); running it on an earlier state makes a second
+branch; re-ordering two steps is just running them in the other order,
+or *undo* and run the other one; a state built from superseded inputs
+is marked ⟳ stale rather than thrown away; an identical re-run is
+recognised by its lineage fingerprint and re-uses the existing state.
+Trace-kill detection deliberately measures amplitude-preserving data from
+before any AGC/balancing — the state it measured is recorded as a second
+input — so its result does not depend on that order. With the recommended
+order the results are bit-for-bit identical to the previous (linear)
+version.
 
 ### Other documented simplifications
 
@@ -539,20 +569,30 @@ Surface (Time) Map → Attribute Analysis**:
   documented fixes above plus shot/CDP gather round-tripping, geometry
   merging, trace edit/de-spiking, predictive deconvolution, CVS, the
   attributes, and horizon curvature.
-- `tests/test_dependencies.py` — the dependency engine with no data and no
-  UI (80 tests): the recommended order gives zero warnings at every step;
-  the two non-standard orders from the design brief; every optional stage
-  skippable; shot-domain steps in all permutations; every genuine
-  dependency failing as ⛔; invalidation of dependents only; stale notes;
-  recommendations consistent with the recommended order.
+- `tests/test_state_graph.py` — the state graph with no data and no UI
+  (22 tests): sequential ids that are never reused, what each state
+  records, deterministic lineage fingerprints, current pointers, branching,
+  undo/redo, dependents/ancestors, discard, reset, recipe, JSON export.
+- `tests/test_dependencies.py` — the dependency engine on a bare graph (90
+  tests): the recommended order gives zero warnings at every step; the two
+  non-standard orders from the design brief; every optional stage
+  skippable; shot-domain steps in all 24 orders; every genuine
+  dependency failing as ⛔; repeated operations and branching; stale
+  reasons; inputs from different gathers; recommendations consistent with
+  the recommended order.
 - `tests/test_stage_ops.py` — the same behaviours through the real
-  processing maths (45 tests): non-standard orders, skipped stages,
-  `DependencyError` leaving no trace, re-runs freeing data, pre-stack
-  migration with no stack, execution-order history/exports, and
-  executors refusing exactly what the UI marks ⛔.
-- `tests/test_app_nonlinear.py` — the app driven headlessly (13 tests): ⛔
+  processing maths, plus the state model (79 tests): non-standard orders,
+  skipped stages, `DependencyError` leaving no trace, repeat / branch /
+  memoise, no input copies, release and re-compute bit-for-bit, the memory
+  budget, undo/redo, discard, stale detection after real runs, replaying a
+  recipe to the identical result, pre-stack migration with no stack,
+  exports, and executors refusing exactly what the UI marks ⛔.
+- `tests/test_app_nonlinear.py` — the app driven headlessly (23 tests): ⛔
   messages and absent controls, ⚠ *Continue?* / *Cancel*, non-standard
-  orders, a skip-everything run to a final section.
+  orders, a skip-everything run to a final section, which state each run
+  consumed and produced, identical re-runs reusing a state, choosing an
+  earlier input, stale ⟳ notes, and undo / redo / discard / free memory
+  from the page.
 
 Bugs found and fixed via this testing, beyond the NMO/picker/de-spike
 items documented above: `pick_velocity_field` crashed outright on a
@@ -568,8 +608,8 @@ Run (requires `pip install pytest` in addition to `requirements.txt`):
 pytest tests/test_pipeline.py -v
 python tests/manual_pipeline_check.py
 python tests/test_app_flow.py
-# dependency model:
-pytest tests/test_dependencies.py tests/test_stage_ops.py tests/test_app_nonlinear.py -v
+# state model and dependency rules:
+pytest tests/test_state_graph.py tests/test_dependencies.py tests/test_stage_ops.py tests/test_app_nonlinear.py -v
 ```
 
 ---
@@ -594,10 +634,21 @@ pytest tests/test_dependencies.py tests/test_stage_ops.py tests/test_app_nonline
   entries, and for the F-K polygon also supports reordering vertices via
   an explicit **order** column (plain Streamlit has no drag-and-drop row
   reordering).
-- Re-ordering finished steps is discard-then-re-run (a result cannot be
-  un-applied from the middle of a chain). Dependencies are tracked per
-  stage, not per parameter set. Recommendations are pairwise (e.g. there
+- Every state keeps its own full arrays (about the size of the raw data
+  per shot-domain state), so a long exploratory session uses memory;
+  *Free memory* on the data-states panel or `STATE_MEMORY_BUDGET_MB` in
+  `config.py` releases old states, which are then re-computed from their
+  recorded operation when needed (CPU time instead of memory — nothing is
+  spilled to disk). Undo/redo and "make current" move a pointer; there is
+  no "un-apply from the middle of a chain": to change an early step, run
+  it on the state you want and continue from there (the states built on the
+  old one stay, marked stale). Recommendations are pairwise (e.g. there
   is no direct "RNA before TVF" advice, only RNA→decon and decon→TVF).
+- Manual velocity picks and excluded CDPs are parameters of the *next*
+  velocity run (a new state), not edits applied retroactively to an
+  existing one.
+- A recipe replays on the same survey: its fingerprints include a digest
+  of the loaded data (a strided sample for very large arrays).
 - Pre-stack migration on un-regularised gathers runs, but sums over
   irregular offsets; Data Regularisation is recommended before it.
 - Geometry merging combines surveys without ID collisions but doesn't

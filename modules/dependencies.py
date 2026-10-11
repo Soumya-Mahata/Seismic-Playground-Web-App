@@ -1,55 +1,54 @@
 """
-modules/dependencies.py — Dependency-aware workflow engine
-=============================================================
-Answers, for any stage at any moment: *can it run, and is it advisable?*
-No Streamlit dependency — pure Python, so every rule here is unit-tested
-without a UI (see tests/test_dependencies.py).
+modules/dependencies.py — Dependency-aware workflow engine, on data states
+===========================================================================
+Answers, for any operation at any moment: *which data states would it
+read, can it run, and is it advisable?* No Streamlit dependency — pure
+Python, so every rule here is unit-tested without a UI.
 
-The model keeps four ideas apart (they used to be one hard-coded chain):
+Five ideas kept apart (they used to be one hard-coded chain):
 
   RECOMMENDED ORDER      `pipeline.PIPELINE_STAGES` — advice, never enforced.
-  GENUINE DEPENDENCIES   `StageSpec.needs`  — an input the computation
+  GENUINE DEPENDENCIES   `StageSpec.needs`  — an input state the computation
                          cannot run without. Missing  ->  ⛔ blocked.
   RECOMMENDATIONS        `StageSpec.advice` — scientifically preferable
-                         ordering. Missing / out of order  ->  ⚠ warning,
-                         never a block.
-  CURRENT DATA STATE     `WorkflowState` — derived from the processing
-                         history: which products exist and what has been
-                         applied to the data a stage would read next.
-  PROCESSING HISTORY     the same history, in execution order.
+                         ordering. Missing / out of order  ->  ⚠ warning.
+  DATA STATES            `state_graph.ProcessingGraph` — what data exists and
+                         how each state was made: INPUT STATE -> OPERATION +
+                         PARAMETERS -> OUTPUT STATE.
+  STALENESS              derived here from the graph: a state is stale when
+                         an input it was built from has since been superseded.
 
-Core idea — provenance instead of position
-------------------------------------------
-Every executed stage records which upstream stage outputs it *consumed*
-(`HistoryEntry.consumed`: role -> stage id). From those edges:
+How an operation finds its input
+--------------------------------
+A `Need` lists *candidates*. `'@shot'` means "whichever shot-domain state is
+current"; a bare stage id (`'vel1'`) means "the latest state that stage
+produced". The default is the most preferred candidate that exists; a
+person (or a test) can name any other candidate state explicitly
+(`inputs={'data': 'S4'}`) — that is how an operation is applied to an
+earlier state, or redone with different parameters.
 
-  * a stage's input is "the head of its data stream" — the most recent
-    valid output of the stages that transform that data — not "the stage
-    before me in the list". So AGC can read raw traces, or band-passed
-    ones, whichever is the current state of the shot gathers;
-  * "has X been applied to this data?" is an ancestry query, not a
-    check on a global done-flag;
-  * re-running a stage invalidates exactly its *dependents* (the stages
-    that consumed its output, transitively), no more.
+Nothing is ever overwritten. Re-running an operation creates a new state;
+states built from the old one are flagged *stale* (still valid data, just
+not built from the latest inputs) rather than discarded.
 
-Streams
--------
-  shot     shot_gathers -> {despike, bandpass, agc, trace_edit, mute,
-                            balance, fk, mult_supp, decon}
-  cdp      cdp_sort     -> {statics, inv_nmo, data_reg}   (pre-NMO gathers)
-  section  stack        -> {rna, decon_post, tvf}         (stacked section)
-
-NMO (nmo1, nmo_final), DMO, velocity analysis, stacking, migration and
-final scaling *consume* a stream's head but are not members of it.
+Kinds, roots and "same gathers"
+-------------------------------
+Gather-based states (shot, cdp, nmo, …) store their per-gather arrays in the
+container of their *root* (the `shot_gathers` or `cdp_sort` state they descend
+from). Two inputs of one operation must come from the same root — a velocity
+field picked on one CDP sort cannot flatten the gathers of another. Resolution
+therefore picks `data` first and then prefers inputs with the same root; if
+only mismatching ones exist the operation is ⛔ with a message saying so.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
 
-from modules.pipeline import HistoryEntry, PIPELINE_STAGES, log_step, stage_label
+from modules.pipeline import PIPELINE_STAGES, STAGE_KIND, stage_label
+from modules.state_graph import DataState, ProcessingGraph
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -79,10 +78,12 @@ class Level(IntEnum):
 @dataclass(frozen=True)
 class Issue:
     level: Level
-    kind: str          # missing_input | fallback_input | missing_recommended | order_inversion
-                       # | orphaned_step | geometry
+    kind: str          # missing_input | container_mismatch | invalid_input | fallback_input
+                       # | missing_recommended | order_inversion | orphaned_step
+                       # | repeated_operation | stale_input | geometry
     message: str
     stages: Tuple[str, ...] = ()   # stage ids this issue is about
+    states: Tuple[str, ...] = ()   # state ids this issue is about
     fix: str = ""                  # where / how to resolve it
 
 
@@ -91,8 +92,10 @@ class StageCheck:
     stage_id: str
     variant: Optional[str]
     issues: List[Issue]
-    inputs: Dict[str, Optional[str]]       # role -> resolved upstream stage id (None = missing)
-    done: bool = False
+    inputs: Dict[str, Optional[str]]       # role -> resolved input STATE id (None = missing)
+    done: bool = False                     # has this operation produced any state?
+    options: Dict[str, List[DataState]] = field(default_factory=dict)   # role -> every usable state
+    states: Dict[str, Optional[DataState]] = field(default_factory=dict)  # role -> resolved state
 
     @property
     def blockers(self) -> List[Issue]:
@@ -117,17 +120,18 @@ class StageCheck:
     def blocker_text(self) -> str:
         return " ".join(i.message + (f" → {i.fix}" if i.fix else "") for i in self.blockers)
 
+    def state(self, role: str = "data") -> Optional[DataState]:
+        return self.states.get(role)
+
 
 # ─────────────────────────────────────────────────────────────────────────
-# Streams
+# Streams (a "stream" is a kind of data whose current state is the next input)
 # ─────────────────────────────────────────────────────────────────────────
 
 STREAM_BASE: Dict[str, str] = {"shot": "shot_gathers", "cdp": "cdp_sort", "section": "stack"}
 STREAM_MEMBERS: Dict[str, Tuple[str, ...]] = {
-    "shot": ("despike", "bandpass", "agc", "trace_edit", "mute", "balance", "fk", "mult_supp", "decon"),
-    "cdp": ("statics", "inv_nmo", "data_reg"),
-    "section": ("rna", "decon_post", "tvf"),
-}
+    kind: tuple(op for op, k in STAGE_KIND.items() if k == kind and op != STREAM_BASE[kind])
+    for kind in STREAM_BASE}
 SHOT_OPERATORS: Tuple[str, ...] = STREAM_MEMBERS["shot"]
 
 # Where in the app each stage lives — used to tell a person where to go.
@@ -188,6 +192,10 @@ def _phrase(stage_id: str) -> str:
     return PHRASE.get(stage_id, stage_label(stage_id))
 
 
+def _cap(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
 def _join(items: Sequence[str]) -> str:
     items = list(items)
     if len(items) <= 1:
@@ -195,100 +203,65 @@ def _join(items: Sequence[str]) -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
+def state_name(state: Optional[DataState]) -> str:
+    """'Band-pass (S3)' — or 'AGC v2 (S7)' for the second state an operation made."""
+    if state is None:
+        return "—"
+    v = f" v{state.version}" if state.version > 1 else ""
+    return f"{SHORT.get(state.op, state.op)}{v} ({state.id})"
+
+
 # ─────────────────────────────────────────────────────────────────────────
-# Workflow state (provenance)
+# Workflow = the graph, seen through the question "what would an operation read?"
 # ─────────────────────────────────────────────────────────────────────────
 
-class WorkflowState:
-    """The current data state, derived from the processing history.
+class Cand(NamedTuple):
+    state: DataState
+    index: int               # which candidate token supplied it (0 = most preferred)
+    via: Optional[str]       # '@kind' if supplied by a current-state token
 
-    Wraps (and mutates in place) a list of `HistoryEntry`. That list is
-    the single source of truth: a stage is "available as an input" exactly
-    when it has a valid entry in it. Streamlit's session state simply
-    holds the list; tests hold a plain list."""
 
-    def __init__(self, history: Optional[List[HistoryEntry]] = None):
-        self.history: List[HistoryEntry] = history if history is not None else []
+class Workflow:
+    """A view over a `ProcessingGraph` (which is the single source of truth;
+    Streamlit's session state holds the graph, tests hold a plain one)."""
 
-    # ---- simple queries ---------------------------------------------------
-    def entry(self, stage_id: str) -> Optional[HistoryEntry]:
-        for h in self.history:
-            if h.stage_id == stage_id:
-                return h
-        return None
+    def __init__(self, graph: Optional[ProcessingGraph] = None):
+        self.graph: ProcessingGraph = graph if graph is not None else ProcessingGraph()
 
-    def has(self, stage_id: str) -> bool:
-        return self.entry(stage_id) is not None
+    # ---- simple queries -----------------------------------------------------
+    def has(self, stage_id: str, variant: Optional[str] = None) -> bool:
+        return bool(self.graph.of_op(stage_id, variant))
 
     def completed(self) -> Set[str]:
-        return {h.stage_id for h in self.history}
+        return {s.op for s in self.graph}
 
-    # ---- stream heads ------------------------------------------------------
-    def stream_head(self, stream: str, exclude: Iterable[str] = ()) -> Optional[str]:
-        """Most recently produced valid output of `stream` (its base counts
-        as the oldest member). `exclude` hides stages (used when re-running
-        a stage, so it never reads its own output or a descendant's)."""
-        exclude = set(exclude)
-        ids = (STREAM_BASE[stream],) + STREAM_MEMBERS[stream]
-        best: Optional[HistoryEntry] = None
-        for h in self.history:
-            if h.stage_id in ids and h.stage_id not in exclude:
-                if best is None or h.seq > best.seq:
-                    best = h
-        return best.stage_id if best else None
+    def current(self, kind: str) -> Optional[DataState]:
+        return self.graph.current(kind)
 
-    # ---- provenance --------------------------------------------------------
-    def data_ancestry(self, stage_id: Optional[str]) -> List[str]:
-        """Stages applied to the data that `stage_id` holds, oldest first,
-        ending with `stage_id` itself (follows the 'data' input edges)."""
-        out: List[str] = []
+    def latest(self, stage_id: str, variant: Optional[str] = None) -> Optional[DataState]:
+        return self.graph.latest(stage_id, variant)
+
+    def lineage_ops(self, state_id: Optional[str]) -> List[str]:
+        """Operations applied to the data a state holds, oldest first."""
+        return [s.op for s in self.graph.lineage(state_id)]
+
+    # ---- candidates ---------------------------------------------------------------
+    def candidates(self, need: "Need") -> List[Cand]:
+        out: List[Cand] = []
         seen: Set[str] = set()
-        cur = stage_id
-        while cur and cur not in seen:
-            seen.add(cur)
-            out.append(cur)
-            e = self.entry(cur)
-            cur = e.consumed.get("data") if e else None
-        return list(reversed(out))
+        for i, tok in enumerate(need.candidates):
+            if tok.startswith("@"):
+                states, via = self.graph.of_kind(tok[1:]), tok
+            else:
+                states, via = self.graph.of_op(tok), None
+            for s in states:
+                if s.id not in seen:
+                    seen.add(s.id)
+                    out.append(Cand(s, i, via))
+        return out
 
-    def dependents(self, stage_id: str) -> List[str]:
-        """Every stage that consumed `stage_id`'s output, directly or
-        through other stages (any input role), in execution order."""
-        frontier = {stage_id}
-        found: Set[str] = set()
-        changed = True
-        while changed:
-            changed = False
-            for h in self.history:
-                if h.stage_id in found or h.stage_id == stage_id:
-                    continue
-                if any(src in frontier for src in h.consumed.values()):
-                    found.add(h.stage_id)
-                    frontier.add(h.stage_id)
-                    changed = True
-        return [h.stage_id for h in sorted(self.history, key=lambda e: e.seq) if h.stage_id in found]
-
-    # ---- mutation ----------------------------------------------------------
-    def invalidate(self, stage_id: str, include_self: bool = True) -> List[str]:
-        """Drop `stage_id` (optionally) and everything built on it.
-        Returns the stage ids removed, so the caller can free their data."""
-        removed = self.dependents(stage_id)
-        if include_self and self.has(stage_id):
-            removed = [stage_id] + removed
-        self.history[:] = [h for h in self.history if h.stage_id not in set(removed)]
-        return removed
-
-    def record(self, stage_id: str, *, consumed: Optional[Dict[str, str]] = None,
-               params: Optional[dict] = None, notes: str = "", input_key: str = "",
-               output_key: str = "", offsets_key: str = "", variant: str = "") -> List[str]:
-        """Record a completed run. Invalidates the stage's dependents (they
-        were built from its previous output) and supersedes its own entry.
-        Returns the stage ids that were invalidated."""
-        removed = self.invalidate(stage_id, include_self=False)
-        self.history[:] = log_step(self.history, stage_id, params, notes, consumed=consumed,
-                                   input_key=input_key, output_key=output_key,
-                                   offsets_key=offsets_key, variant=variant)
-        return removed
+    def dependents(self, state_id: str) -> List[DataState]:
+        return self.graph.dependents(state_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -300,24 +273,28 @@ class Need:
     """One genuine input of a stage.
 
     `candidates` are tried in order of preference. A token starting with
-    '@' means "the head of that stream" ('@shot', '@cdp', '@section');
-    anything else is a stage id whose output is the input. If a candidate
-    other than the first supplies the input and `fallback` is set, the
-    stage is still runnable but gets a ⚠ with that text."""
+    '@' means "the current state of that kind" ('@shot', '@cdp',
+    '@section'); anything else is a stage id whose latest state is the
+    input. If a candidate other than the first supplies the input and
+    `fallback` is set, the stage is still runnable but gets a ⚠ with that
+    text.
+
+    `track`: a finished state is *stale* when the input this need would
+    resolve to today is not the one it recorded."""
     role: str
     candidates: Tuple[str, ...]
     what: str
     why: str = ""
     fix: str = ""
     fallback: str = ""
-    track: bool = False   # report "built from earlier data" for a finished stage
+    track: bool = False
 
 
 @dataclass(frozen=True)
 class Advice:
     """A scientifically preferable ordering — never blocks.
 
-    mode "all": each listed stage should be in the ancestry of the data
+    mode "all": each listed stage should be in the lineage of the data
     this stage reads (one ⚠ naming whichever are missing).
     mode "any": at least one should be."""
     stages: Tuple[str, ...]
@@ -330,20 +307,20 @@ class Advice:
 class StageSpec:
     needs: Tuple[Need, ...] = ()
     advice: Tuple[Advice, ...] = ()
-    checks: Tuple[Callable[["WorkflowState", Dict[str, Optional[str]]], List[Issue]], ...] = ()
+    checks: Tuple[Callable[[Workflow, Dict[str, Optional[DataState]]], List[Issue]], ...] = ()
 
 
-def _statics_geometry(state: WorkflowState, inputs: Dict[str, Optional[str]]) -> List[Issue]:
+def _statics_geometry(wf: Workflow, inputs: Dict[str, Optional[DataState]]) -> List[Issue]:
     data = inputs.get("data")
-    if data and "data_reg" in state.data_ancestry(data):
+    if data is not None and "data_reg" in wf.lineage_ops(data.id):
         return [Issue(
             Level.BLOCKED, "geometry",
             "Residual statics are surface-consistent: they need each trace's own shot and receiver. "
             "Regularised gathers hold interpolated traces on a synthetic offset grid, so that "
             "identity is gone.",
-            stages=("data_reg",),
-            fix="Apply residual statics before Data Regularisation (or discard Data Regularisation "
-                "and what was built on it).")]
+            stages=("data_reg",), states=(data.id,),
+            fix="Apply residual statics before Data Regularisation (or choose gathers that were not "
+                "regularised as the input).")]
     return []
 
 
@@ -393,28 +370,30 @@ STAGE_SPECS: Dict[str, StageSpec] = {
 
     # ---- velocity / NMO / statics / DMO / regularisation --------------------
     "vel1": StageSpec(needs=(Need("data", ("cdp_sort",), "CDP gathers", fix="Run CDP Sort & Binning",
-                                  why="Velocity analysis scans offset-sorted CDP gathers."),)),
+                                  why="Velocity analysis scans offset-sorted CDP gathers.",
+                                  track=True),)),
     "nmo1": StageSpec(needs=(
-        Need("data", ("cdp_sort",), "CDP gathers", fix="Run CDP Sort & Binning"),
+        Need("data", ("cdp_sort",), "CDP gathers", fix="Run CDP Sort & Binning", track=True),
         Need("velocity", ("vel1",), "pass-1 stacking velocities", fix=STAGE_LOCATION["vel1"],
-             why="NMO correction is defined by a velocity function."))),
+             why="NMO correction is defined by a velocity function.", track=True))),
     "statics": StageSpec(
         needs=(_CDP_HEAD,
                Need("nmo", ("nmo1",), "NMO-flattened gathers (NMO Pass 1)", fix=STAGE_LOCATION["nmo1"],
                     why="Residual statics are estimated by cross-correlating NMO-flattened traces "
-                        "with a pilot trace.")),
+                        "with a pilot trace.", track=True)),
         checks=(_statics_geometry,)),
     "dmo": StageSpec(
         needs=(_CDP_HEAD,
                Need("velocity", ("vel1",), "pass-1 stacking velocities", fix=STAGE_LOCATION["vel1"],
                     why="DMO acts on NMO-corrected data, so it needs the velocities that flatten the "
-                        "gathers first.")),
+                        "gathers first.", track=True)),
         advice=(Advice(("statics",), "Residual statics are normally applied before DMO so the DMO "
                                      "stretch does not smear uncorrected shifts."),)),
     "inv_nmo": StageSpec(needs=(
         Need("data", ("dmo",), "DMO-corrected gathers", fix=STAGE_LOCATION["dmo"],
-             why="Inverse NMO undoes pass-1 NMO on the DMO output."),
-        Need("velocity", ("vel1",), "pass-1 stacking velocities", fix=STAGE_LOCATION["vel1"]))),
+             why="Inverse NMO undoes pass-1 NMO on the DMO output.", track=True),
+        Need("velocity", ("vel1",), "pass-1 stacking velocities", fix=STAGE_LOCATION["vel1"],
+             track=True))),
     "data_reg": StageSpec(needs=(_CDP_HEAD,)),
     "vel2": StageSpec(needs=(_CDP_HEAD,), advice=(
         Advice(("statics", "inv_nmo", "data_reg"), "", mode="any",
@@ -488,93 +467,124 @@ def get_spec(stage_id: str, variant: Optional[str] = None) -> StageSpec:
 # Resolution
 # ─────────────────────────────────────────────────────────────────────────
 
-@dataclass
-class _Resolved:
-    stage: Optional[str]
-    index: int                 # which candidate supplied it (0 = most preferred), -1 = none
-    via_stream: Optional[str]  # stream name if supplied by a '@stream' head
+def _resolve_all(wf: Workflow, spec: StageSpec, overrides: Mapping[str, str], lenient: bool = False
+                 ) -> Tuple[Dict[str, Optional[Cand]], Dict[str, List[Cand]], List[Issue]]:
+    """Pick one state per need. 'data' first; every other role must come from
+    the same gather root as it. Returns (chosen, options, issues).
+
+    An explicit `overrides[role]` that is not a usable state is a ⛔ — unless
+    `lenient` (a remembered choice from the UI that has since gone stale),
+    in which case it is ignored and the default is used."""
+    chosen: Dict[str, Optional[Cand]] = {}
+    options: Dict[str, List[Cand]] = {}
+    issues: List[Issue] = []
+    root: Optional[str] = None
+    for need in sorted(spec.needs, key=lambda n: n.role != "data"):
+        cands = wf.candidates(need)
+        usable = cands
+        if need.role != "data" and root is not None:
+            usable = [c for c in cands if c.state.root in (None, root)]
+        options[need.role] = usable
+        pick = overrides.get(need.role)
+        choice: Optional[Cand] = None
+        if pick:
+            choice = next((c for c in usable if c.state.id == pick), None)
+            if choice is None and lenient:
+                pick = None
+        if pick and choice is None:
+            issues.append(Issue(
+                Level.BLOCKED, "invalid_input",
+                f"{pick} cannot be used as the {need.what} input here"
+                + (" (it is not one of the usable states)." if pick in wf.graph else
+                   " (that state no longer exists)."),
+                states=(pick,), fix="Choose one of the listed input states."))
+            chosen[need.role] = None
+            continue
+        if choice is None:
+            if usable:
+                choice = usable[0]
+            elif cands:                      # they exist, but on different gathers
+                other = cands[0].state
+                issues.append(Issue(
+                    Level.BLOCKED, "container_mismatch",
+                    f"The {need.what} ({state_name(other)}) were made on different gathers "
+                    f"({state_name(wf.graph.get(other.root))}) than the data this step reads "
+                    f"({state_name(wf.graph.get(root))}), so the two cannot be combined.",
+                    stages=tuple(t for t in need.candidates if not t.startswith("@")),
+                    states=(other.id,),
+                    fix=f"Run {STAGE_LOCATION.get(other.op, stage_label(other.op))} again on the "
+                        f"current gathers."))
+                chosen[need.role] = None
+                continue
+            else:
+                issues.append(Issue(
+                    Level.BLOCKED, "missing_input",
+                    f"Required input missing: {need.what}." + (f" {need.why}" if need.why else ""),
+                    stages=tuple(t for t in need.candidates if not t.startswith("@")),
+                    fix=need.fix))
+                chosen[need.role] = None
+                continue
+        chosen[need.role] = choice
+        if need.role == "data":
+            root = choice.state.root
+    return chosen, options, issues
 
 
-def _resolve(state: WorkflowState, need: Need, exclude: Set[str]) -> _Resolved:
-    for i, tok in enumerate(need.candidates):
-        if tok.startswith("@"):
-            head = state.stream_head(tok[1:], exclude)
-            if head:
-                return _Resolved(head, i, tok[1:])
-        elif state.has(tok) and tok not in exclude:
-            return _Resolved(tok, i, None)
-    return _Resolved(None, -1, None)
-
-
-def _exclusions(state: WorkflowState, stage_id: str) -> Set[str]:
-    """A stage never reads its own output or anything built on it."""
-    ex = {stage_id}
-    if state.has(stage_id):
-        ex |= set(state.dependents(stage_id))
-    return ex
-
-
-def resolve_inputs(state: WorkflowState, stage_id: str, variant: Optional[str] = None
-                   ) -> Dict[str, Optional[str]]:
-    spec = get_spec(stage_id, variant)
-    ex = _exclusions(state, stage_id)
-    return {n.role: _resolve(state, n, ex).stage for n in spec.needs}
+def resolve_inputs(wf: Workflow, stage_id: str, variant: Optional[str] = None,
+                   inputs: Optional[Mapping[str, str]] = None) -> Dict[str, Optional[str]]:
+    """role -> state id this stage would read (None where nothing usable exists)."""
+    chosen, _, _ = _resolve_all(wf, get_spec(stage_id, variant), inputs or {}, lenient=True)
+    return {r: (c.state.id if c else None) for r, c in chosen.items()}
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # The check
 # ─────────────────────────────────────────────────────────────────────────
 
-def check_stage(state: WorkflowState, stage_id: str, variant: Optional[str] = None) -> StageCheck:
-    """Evaluate one stage against the current data state.
+def check_stage(wf: Workflow, stage_id: str, variant: Optional[str] = None,
+                inputs: Optional[Mapping[str, str]] = None, lenient: bool = False) -> StageCheck:
+    """Evaluate one operation against the current data states.
 
-    BLOCKED  — a `Need` has no valid supplier (genuine dependency).
-    WARNING  — runnable, but: a recommended predecessor is not part of
-               the data it would read; a recommended successor is already
-               part of that data (the step would run out of order); an
-               input comes from a less-preferred fallback; or a step has
-               been run whose result is not in the data this step reads.
+    BLOCKED  — a `Need` has no usable state (genuine dependency), or the
+               inputs come from different gathers.
+    WARNING  — runnable, but: a recommended predecessor is not part of the
+               data it would read; a recommended successor already is (it
+               would run out of order); an input comes from a less-
+               preferred fallback; the operation was already applied to
+               that data (it would be applied twice); a step's result is
+               not in the data this step reads; or the input state is stale.
+
+    `inputs` names explicit states for some roles ({'data': 'S4'}); any role
+    not named takes its default. An explicit state that is not usable is a ⛔
+    (or, with `lenient`, ignored — for a remembered UI choice gone stale).
     """
     spec = get_spec(stage_id, variant)
-    ex = _exclusions(state, stage_id)
-    issues: List[Issue] = []
-    inputs: Dict[str, Optional[str]] = {}
-    data_res: Optional[_Resolved] = None
+    g = wf.graph
+    chosen, options, issues = _resolve_all(wf, spec, inputs or {}, lenient)
+    states = {r: (c.state if c else None) for r, c in chosen.items()}
 
-    # 1) genuine dependencies -----------------------------------------------
     for need in spec.needs:
-        res = _resolve(state, need, ex)
-        inputs[need.role] = res.stage
-        if need.role == "data":
-            data_res = res
-        if res.stage is None:
-            msg = f"Required input missing: {need.what}."
-            if need.why:
-                msg += f" {need.why}"
-            issues.append(Issue(Level.BLOCKED, "missing_input", msg,
-                                stages=tuple(t for t in need.candidates if not t.startswith("@")),
-                                fix=need.fix))
-        elif res.index > 0 and need.fallback:
-            issues.append(Issue(Level.WARNING, "fallback_input", need.fallback, stages=(res.stage,)))
+        c = chosen.get(need.role)
+        if c is not None and c.index > 0 and need.fallback:
+            issues.append(Issue(Level.WARNING, "fallback_input", need.fallback,
+                                stages=(c.state.op,), states=(c.state.id,)))
 
-    # 2) extra structural checks (e.g. trace geometry) ------------------------
+    # extra structural checks (e.g. trace geometry) ---------------------------------
     for chk in spec.checks:
-        issues.extend(chk(state, inputs))
+        issues.extend(chk(wf, states))
 
-    # 3) recommendations — only meaningful once the data input is known -------
-    data_stage = inputs.get("data")
-    if data_stage is not None:
-        ancestry = state.data_ancestry(data_stage)
-        in_data = set(ancestry)
+    data_c = chosen.get("data")
+    data = data_c.state if data_c else None
+    if data is not None:
+        lineage = g.lineage(data.id)
+        in_data = [s.op for s in lineage]
+        in_data_set = set(in_data)
 
-        # 3a) recommended predecessors missing from the data being read
+        # a) recommended predecessors missing from the data being read ----------------
         for adv in spec.advice:
-            present = [s for s in adv.stages if s in in_data]
-            missing = [s for s in adv.stages if s not in in_data]
-            if adv.mode == "any":
-                trigger = not present
-            else:
-                trigger = bool(missing)
+            present = [s for s in adv.stages if s in in_data_set]
+            missing = [s for s in adv.stages if s not in in_data_set]
+            trigger = (not present) if adv.mode == "any" else bool(missing)
             if not trigger:
                 continue
             names = _join([_phrase(s) for s in (adv.stages if adv.mode == "any" else missing)])
@@ -584,44 +594,151 @@ def check_stage(state: WorkflowState, stage_id: str, variant: Optional[str] = No
                 msg = f"None of {names} has been applied to the current data. {adv.reason}"
             else:
                 many = len(missing) > 1
-                msg = (f"{names[0].upper() + names[1:]} {'are' if many else 'is'} commonly applied "
+                msg = (f"{_cap(names)} {'are' if many else 'is'} commonly applied "
                        f"before {_phrase(stage_id)}, but {'they have' if many else 'it has'} not been "
                        f"applied to the current data. {adv.reason}")
             issues.append(Issue(Level.WARNING, "missing_recommended", msg.strip(),
                                 stages=tuple(adv.stages)))
 
-        # 3b) running out of order: a stage that is normally applied AFTER
-        #     this one is already part of the data this one will read
-        for done_stage in ancestry:
-            if done_stage == stage_id or done_stage not in STAGE_SPECS:
+        # b) running out of order: a stage normally applied AFTER this one is already
+        #    part of the data this one will read -------------------------------------------
+        for done_op in dict.fromkeys(in_data):
+            if done_op == stage_id or done_op not in STAGE_SPECS:
                 continue
-            for adv in STAGE_SPECS[done_stage].advice:
+            for adv in STAGE_SPECS[done_op].advice:
                 if stage_id in adv.stages:
                     issues.append(Issue(
                         Level.WARNING, "order_inversion",
-                        f"{_phrase(stage_id)[0].upper() + _phrase(stage_id)[1:]} is commonly applied "
-                        f"before {_phrase(done_stage)}, but {_phrase(done_stage)} is already part of "
+                        f"{_cap(_phrase(stage_id))} is commonly applied "
+                        f"before {_phrase(done_op)}, but {_phrase(done_op)} is already part of "
                         f"the current data — it will be applied after it.",
-                        stages=(stage_id, done_stage)))
+                        stages=(stage_id, done_op)))
                     break
 
-        # 3c) orphaned steps: valid steps in the same stream whose result is
-        #     not in the data this step will read
-        if data_res is not None and data_res.via_stream:
-            stream = data_res.via_stream
-            for member in STREAM_MEMBERS[stream]:
-                if member in in_data or member in ex or not state.has(member):
+        # c) repeated operation: this operation is already in the data's lineage -------------
+        again = [s for s in lineage if s.op == stage_id]
+        if again:
+            prev = again[-1]
+            before = g.get(prev.inputs.get("data"))
+            redo_hint = (f" To redo it with different settings instead, run it on the state before it "
+                         f"({state_name(before)})." if before is not None else "")
+            issues.append(Issue(
+                Level.WARNING, "repeated_operation",
+                f"{_cap(_phrase(stage_id))} has already been applied to the data this step will read "
+                f"({state_name(prev)}), so it would be applied twice.{redo_hint}",
+                stages=(stage_id,), states=(prev.id,)))
+
+        # d) orphaned steps: results in the same stream that are not part of this data ----------
+        if data_c is not None and data_c.via:
+            kind = data_c.via[1:]
+            ahead = {d.id for d in g.dependents(data.id)}      # undone / redo-able work is not orphaned
+            for member in STREAM_MEMBERS.get(kind, ()):
+                if member in in_data_set:
+                    continue                                    # applied here (maybe another version)
+                orphans = [s for s in g.of_op(member) if s.id not in ahead]
+                if not orphans:
                     continue
                 issues.append(Issue(
                     Level.WARNING, "orphaned_step",
-                    f"{stage_label(member)} has been run, but its result is not part of the data this "
-                    f"step will read (that data was produced before it ran).",
-                    stages=(member,),
-                    fix="Re-run the step that produced the data this reads, or continue as is."))
+                    f"{stage_label(member)} has been run ({state_name(orphans[0])}), but its result is "
+                    f"not part of the data this step will read (that data was produced without it).",
+                    stages=(member,), states=(orphans[0].id,),
+                    fix="Run the missing step on the current data, choose a different input state, "
+                        "or continue as is."))
+
+    # e) stale inputs ------------------------------------------------------------------------------
+    stale = stale_info(wf)
+    for role, st_ in states.items():
+        if st_ is not None and st_.id in stale:
+            issues.append(Issue(
+                Level.WARNING, "stale_input",
+                f"The {role} input ({state_name(st_)}) is out of date: {stale[st_.id][0].detail} "
+                f"Re-run the steps that produced it, or choose another input.",
+                states=(st_.id,)))
 
     issues.sort(key=lambda i: -int(i.level))
-    return StageCheck(stage_id=stage_id, variant=variant, issues=issues, inputs=inputs,
-                      done=state.has(stage_id))
+    return StageCheck(
+        stage_id=stage_id, variant=variant, issues=issues,
+        inputs={r: (s.id if s else None) for r, s in states.items()},
+        done=wf.has(stage_id, variant), states=states,
+        options={r: [c.state for c in cs] for r, cs in options.items()})
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Staleness
+# ─────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class StaleReason:
+    kind: str          # behind | replaced | rolled_back | diverged | inherited
+    detail: str
+    source: str = ""   # id of the input state that is out of date
+
+
+def stale_info(wf: Workflow) -> Dict[str, List[StaleReason]]:
+    """State id -> why it is stale (only stale states appear).
+
+    A state is stale when an input it was built from has since been
+    superseded:
+      behind       that input has been processed further since;
+      replaced     the same operation was re-run (new parameters or input);
+      rolled_back  the current data was undone to before that input;
+      diverged     a more preferred source now exists (e.g. Final NMO after a
+                   stack of NMO Pass 1);
+      inherited    an input is itself stale (so this is too, transitively).
+    Nothing is discarded: a stale state is valid data, just not built from the
+    latest inputs. States are visited in creation order, so inputs are
+    classified before the states built on them."""
+    g = wf.graph
+    out: Dict[str, List[StaleReason]] = {}
+    for s in g:
+        spec = STAGE_SPECS.get(s.op_key())
+        reasons: List[StaleReason] = []
+        if spec is not None:
+            mine = {d.id for d in g.dependents(s.id)} | {s.id}
+            for need in spec.needs:
+                if not need.track:
+                    continue
+                rec = g.get(s.inputs.get(need.role))
+                if rec is None:
+                    continue
+                cur = next((c.state for c in wf.candidates(need) if c.state.id not in mine), None)
+                if cur is None or cur.id == rec.id:
+                    continue
+                me, then, now = state_name(s), state_name(rec), state_name(cur)
+                if g.is_ancestor(rec.id, cur.id):
+                    chain = [x for x in g.lineage(cur.id) if x.seq > rec.seq]
+                    ops = " → ".join(SHORT.get(x.op, x.op) for x in chain) or "further steps"
+                    kind = "behind"
+                    detail = (f"{me} was built from {then}, but that data has since been processed "
+                              f"further ({ops}); the current {need.what} is {now}.")
+                elif g.is_ancestor(cur.id, rec.id):
+                    kind = "rolled_back"
+                    detail = (f"{me} was built from {then}, but the current {need.what} was rolled "
+                              f"back to {now}.")
+                elif cur.op == rec.op and cur.variant == rec.variant:
+                    kind = "replaced"
+                    detail = (f"{me} was built from {then}, which has since been re-run; the current "
+                              f"{need.what} is {now}.")
+                else:
+                    kind = "diverged"
+                    detail = (f"{me} was built from {then}, but the current {need.what} now comes "
+                              f"from {now}.")
+                reasons.append(StaleReason(kind, detail + f" Re-run {_phrase(s.op)} to include it.",
+                                           source=rec.id))
+        for role, src in s.inputs.items():
+            if src in out and not any(r.source == src for r in reasons):
+                reasons.append(StaleReason(
+                    "inherited", f"{state_name(s)} was built from {state_name(g[src])}, which is out "
+                                 f"of date.", source=src))
+        if reasons:
+            out[s.id] = reasons
+    return out
+
+
+def stale_notes(wf: Workflow) -> Dict[str, str]:
+    """state id -> one-sentence note for display (the first reason)."""
+    return {sid: rs[0].detail for sid, rs in stale_info(wf).items()}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -638,54 +755,29 @@ for _s in PIPELINE_STAGES:
         STATUS_ROWS.append((_s.id, None, _s.label))
 
 
-def check_all(state: WorkflowState) -> List[Tuple[str, Optional[str], str, StageCheck]]:
-    return [(sid, v, label, check_stage(state, sid, v)) for sid, v, label in STATUS_ROWS]
+def check_all(wf: Workflow) -> List[Tuple[str, Optional[str], str, StageCheck]]:
+    return [(sid, v, label, check_stage(wf, sid, v)) for sid, v, label in STATUS_ROWS]
 
 
-def stale_notes(state: WorkflowState) -> Dict[str, str]:
-    """For finished stages whose input has since been superseded — e.g. CDP
-    gathers sorted before a later shot-domain step, a stack built from
-    pass-1 NMO after Final NMO was run. Nothing is invalidated (the data
-    are still valid, just not the latest); this is a note, not an error."""
-    notes: Dict[str, str] = {}
-    for h in state.history:
-        key = f"{h.stage_id}:{h.variant}" if h.variant else h.stage_id
-        spec = STAGE_SPECS.get(key)
-        if spec is None:
-            continue
-        ex = _exclusions(state, h.stage_id)
-        for need in spec.needs:
-            if not need.track:
-                continue
-            recorded = h.consumed.get(need.role)
-            current = _resolve(state, need, ex).stage
-            if current and recorded and current != recorded:
-                notes[h.stage_id] = (
-                    f"{h.label} was built from {stage_label(recorded)}, but the current "
-                    f"{need.what} now comes from {stage_label(current)}. Re-run {h.label} to "
-                    f"include it.")
-                break
-    return notes
-
-
-def describe_ancestry(state: WorkflowState, stage_id: Optional[str],
-                      start_after: Sequence[str] = ("upload",)) -> str:
-    """'Raw → Band-pass → F-K' for the data a stage holds."""
-    if stage_id is None:
+def describe_lineage(wf: Workflow, state_id: Optional[str], start_at: Optional[str] = None,
+                     skip: Sequence[str] = ("upload",)) -> str:
+    """'Raw → Band-pass → F-K' for the data a state holds. `start_at` trims the
+    chain to begin at that stage (e.g. the stream's base)."""
+    if state_id is None:
         return "—"
-    chain = [s for s in state.data_ancestry(stage_id) if s not in start_after]
-    return " → ".join(SHORT.get(s, s) for s in chain) or "—"
+    chain = wf.graph.lineage(state_id)
+    if start_at:
+        idx = next((i for i, s in enumerate(chain) if s.op == start_at), None)
+        if idx is not None:
+            chain = chain[idx:]
+    return " → ".join(SHORT.get(s.op, s.op) for s in chain if s.op not in skip) or "—"
 
 
-def describe_stream(state: WorkflowState, stream: str) -> str:
-    head = state.stream_head(stream)
+def describe_stream(wf: Workflow, kind: str) -> str:
+    head = wf.current(kind)
     if head is None:
         return "— (not available yet)"
-    base = STREAM_BASE[stream]
-    chain = state.data_ancestry(head)
-    if base in chain:
-        chain = chain[chain.index(base):]
-    return " → ".join(SHORT.get(s, s) for s in chain)
+    return describe_lineage(wf, head.id, start_at=STREAM_BASE.get(kind))
 
 
 def advice_pairs() -> List[Tuple[str, str]]:

@@ -21,6 +21,7 @@ import numpy as np
 import streamlit as st
 
 from modules import stage_ops, velocity as vel_mod
+from modules.dependencies import state_name
 from utils import session_state as ss
 from utils import workflow_ui as wf
 from visualization import seismic_plots, velocity_plots
@@ -38,16 +39,16 @@ def render():
 
     survey = st.session_state["survey"]
     wf.data_state_caption("shot", "Shot-domain data that will be sorted")
-    wf.stale_banner(["vel1", "nmo1", "statics", "dmo", "inv_nmo", "data_reg", "vel2", "nmo_final",
-                      "stack"])
+    wf.stale_banner(wf.stale_for_ops(["vel1", "nmo1", "statics", "dmo", "inv_nmo", "data_reg", "vel2",
+                                      "nmo_final", "stack"]))
 
-    src = chk.inputs.get("data")
-    if src == "upload":
+    src = chk.state("data")
+    if src.kind == "raw":
         n_in = survey.num_traces
         st.caption(f"No shot gathers were built, so the raw survey ({n_in:,} traces) is sorted directly "
                     f"— sorting only needs the headers.")
     else:
-        shot_gathers = st.session_state["shot_gathers"]
+        shot_gathers = ss.gathers(src)
         n_in = sum(g["traces"].shape[0] for g in shot_gathers.values())
         st.caption(f"Sanity check: {n_in:,} traces going in "
                     f"(survey has {survey.num_traces:,}). Sorting by CDP only re-groups these — it "
@@ -59,17 +60,18 @@ def render():
     if wf.run_button("cdp_sort", "Sort into CDP gathers", key="run_cdp_sort"):
         wf.execute(stage_ops.run_cdp_sort, n_min_traces=n_min)
 
-    wf.undo_panel(["cdp_sort"], "undo_cdp")
+    wf.states_panel(["cdp"], "states_cdp", "🗂 CDP-domain data states · undo · redo")
 
-    if not ss.is_stage_done("cdp_sort"):
+    e = wf.result("cdp_sort")
+    if e is None:
         return
 
-    gathers = st.session_state["gathers"]
-    cdp_list = st.session_state["cdp_list"]
+    wf.result_note(e)
+    gathers = e.gathers
+    cdp_list = list(gathers.keys())
     folds = np.array([g["traces"].shape[0] for g in gathers.values()])
-    e = ss.entry("cdp_sort")
-    st.success(f"✅ {len(cdp_list)} CDP gathers built (fold {folds.min()}-{folds.max()}, "
-                f"{int(folds.sum()):,} traces total) from: **{wf.input_name(e)}**. "
+    st.success(f"✅ {len(cdp_list)} CDP gathers built — **{e.name}** (fold {folds.min()}-{folds.max()}, "
+                f"{int(folds.sum()):,} traces total) from: **{state_name(e.src)}**. "
                 f"Continue to **Velocity, NMO & DMO**.")
     st.plotly_chart(seismic_plots.plot_fold_map(folds, cdp_list), theme=None, key="cdpsort_fold_map")
 

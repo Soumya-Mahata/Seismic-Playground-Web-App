@@ -55,14 +55,15 @@ def render():
     # Needs *a* section — the most advanced valid one (final > migrated > post-stack chain head
     # > stack). Pre-stack migration yields a migrated section without a stack, so "stacking has
     # been run" is not what is required, only that a section exists.
-    section, section_label = ss.best_available_section()
+    section_state, section_label = ss.best_available_state()
+    section = ss.section(section_state)
     if section is None:
         st.info("Interpretation needs a section: run Stacking (then optionally post-stack "
                  "processing, migration and final scaling), or a pre-stack migration.", icon="ℹ️")
         return
 
     survey = st.session_state["survey"]
-    cdp_list = st.session_state["cdp_list"]
+    cdp_list = ss.cdp_list(section_state)
     twt = survey.twt
     horizons: dict = st.session_state["horizons"]
     faults: dict = st.session_state["faults"]

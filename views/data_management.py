@@ -25,7 +25,6 @@ import config as cfg
 from modules import nmo, segy_io, stage_ops, synthetic_data
 from modules.stacking import fold_normalized_stack
 from modules.validation import ValidationError, validate_survey
-from utils import session_state as ss
 from utils import workflow_ui as wf
 from utils.formatting import fmt_ms
 from visualization import seismic_plots, spectra_plots
@@ -276,14 +275,15 @@ def render():
                "data can go straight to CDP Sort & Binning.")
     wf.show_status("shot_gathers")
     if wf.run_button("shot_gathers", "Build shot gathers", key="run_shot_gathers"):
-        stage_ops.run_build_shot_gathers(st.session_state)
-        st.rerun()
+        wf.execute(stage_ops.run_build_shot_gathers)
 
-    if ss.is_stage_done("shot_gathers"):
-        shot_gathers = st.session_state["shot_gathers"]
+    e = wf.result("shot_gathers")
+    if e is not None:
+        wf.result_note(e)
+        shot_gathers = e.gathers
         ch_counts = np.array([g["traces"].shape[0] for g in shot_gathers.values()])
         total_in_shots = int(ch_counts.sum())
-        st.success(f"✅ {len(shot_gathers)} shot gathers built "
+        st.success(f"✅ {len(shot_gathers)} shot gathers built (**{e.name}**) "
                     f"({ch_counts.min()}-{ch_counts.max()} channels/shot). "
                     f"Continue to **Pre-Stack Conditioning** (or skip it and go straight to "
                     f"**CDP Sort & Binning**).")
