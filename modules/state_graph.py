@@ -41,17 +41,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
-import numpy as np
+from modules.action_log import ActionLog
+from modules.canonical import array_digest, canonical, jsonable
+
+__all__ = ["KINDS", "GraphError", "DataState", "ProcessingGraph", "make_fingerprint",
+           "array_digest", "canonical", "jsonable"]      # the last three live in modules/canonical.py
 
 # Kinds of data a state can hold (what a downstream step can ask for).
 KINDS: Tuple[str, ...] = ("raw", "shot", "cdp", "velocity", "nmo", "dmo", "section", "image", "final")
-
-_ARRAY_FULL_HASH_LIMIT = 1_000_000     # elements; above this a strided sample is hashed
 
 
 class GraphError(KeyError):
@@ -62,65 +63,8 @@ class GraphError(KeyError):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Canonical parameters and fingerprints
+# Canonical parameters and fingerprints  (the helpers live in modules/canonical.py)
 # ─────────────────────────────────────────────────────────────────────────
-
-def array_digest(a: np.ndarray) -> str:
-    """Cheap, stable identity of an array: shape, dtype and its bytes (or a
-    strided sample of them when it is large)."""
-    a = np.asarray(a)
-    flat = np.ascontiguousarray(a).ravel()
-    if flat.size > _ARRAY_FULL_HASH_LIMIT:
-        flat = flat[:: max(1, flat.size // 65536)]
-    h = hashlib.sha1()
-    h.update(str((a.shape, str(a.dtype))).encode())
-    h.update(np.ascontiguousarray(flat).tobytes())
-    return h.hexdigest()[:16]
-
-
-def canonical(value: Any) -> Any:
-    """Reduce parameters to plain JSON-able Python with a single spelling
-    (sorted keys, tuples → lists, numpy scalars → Python scalars, arrays →
-    digests). Raises TypeError for anything that cannot be reproduced from
-    its recorded form — a parameter that is not canonical is not
-    reproducible, so it must not be recorded silently."""
-    if value is None or isinstance(value, (bool, str)):
-        return value
-    if isinstance(value, (np.bool_,)):
-        return bool(value)
-    if isinstance(value, (int, np.integer)):
-        return int(value)
-    if isinstance(value, (float, np.floating)):
-        v = float(value)
-        if math.isnan(v):
-            return "nan"
-        if math.isinf(v):
-            return "inf" if v > 0 else "-inf"
-        return v
-    if isinstance(value, np.ndarray):
-        return {"__ndarray__": array_digest(value), "shape": list(value.shape)}
-    if isinstance(value, Mapping):
-        return {str(k): canonical(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
-    if isinstance(value, (set, frozenset)):
-        return sorted((canonical(v) for v in value), key=lambda v: json.dumps(v, sort_keys=True))
-    if isinstance(value, (list, tuple)):
-        return [canonical(v) for v in value]
-    raise TypeError(f"Parameter of type {type(value).__name__} cannot be recorded reproducibly: {value!r}")
-
-
-def jsonable(value: Any) -> Any:
-    """Like `canonical`, but never raises: unknown objects and large arrays
-    are summarised. For diagnostics (`info`) and reports, which are not
-    part of a state's identity."""
-    try:
-        return canonical(value)
-    except TypeError:
-        if isinstance(value, Mapping):
-            return {str(k): jsonable(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple, set, frozenset)):
-            return [jsonable(v) for v in value]
-        return repr(value)[:120]
-
 
 def make_fingerprint(op: str, variant: str, params: Mapping[str, Any],
                      input_fingerprints: Mapping[str, str]) -> str:
@@ -179,7 +123,13 @@ class ProcessingGraph:
         self._counter = 0                    # next id number; never decremented
         self._clock = 0                      # logical time for `touch`
         self._redo: Dict[str, List[str]] = {}
-        self.events: List[Dict[str, Any]] = []
+        # The processing HISTORY: an append-only, immutable record of what the person did, in the
+        # order they did it (modules/action_log.py). It is not derived from the states — states
+        # can be discarded, history cannot — and it survives `reset()` (a new dataset session).
+        self.actions: ActionLog = ActionLog()
+        # Technical trace of things the *system* did (re-computing a released state, freeing
+        # memory to stay in budget). Not history; may be trimmed.
+        self.system_events: List[Dict[str, Any]] = []
 
     # ---- container protocol ----------------------------------------------------
     def __len__(self) -> int:
@@ -276,7 +226,6 @@ class ProcessingGraph:
         state = self[sid]
         self._touch(state)
         self._redo.pop(state.kind, None)
-        self._log("select", [sid], f"{sid} made current {state.kind} data")
         return state
 
     # ---- undo / redo ---------------------------------------------------------------------
@@ -303,7 +252,6 @@ class ProcessingGraph:
             return None
         self._redo.setdefault(kind, []).append(cur.id)
         self._touch(target)
-        self._log("undo", [cur.id, target.id], f"undo {cur.id} → {target.id}")
         return target
 
     def redo_target(self, kind: str) -> Optional[DataState]:
@@ -317,7 +265,6 @@ class ProcessingGraph:
             sid = stack.pop()
             if sid in self._states:
                 self._touch(self._states[sid])
-                self._log("redo", [sid], f"redo → {sid}")
                 return self._states[sid]
         return None
 
@@ -376,28 +323,27 @@ class ProcessingGraph:
             del self._states[v]
         for kind in list(self._redo):
             self._redo[kind] = [i for i in self._redo[kind] if i in self._states]
-        self._log("discard", victims, f"discarded {sid}" + (f" and {len(victims) - 1} built on it"
-                                                              if len(victims) > 1 else ""))
         return victims
 
     def reset(self) -> List[str]:
-        """Forget everything (a new survey was loaded). Ids restart at S0."""
+        """Forget every state (new data was loaded). Ids restart at S0. The action log is
+        NOT cleared — it moves on to a new dataset session, so earlier entries stay."""
         removed = [s.id for s in self]
         self._states.clear()
         self._counter = 0
         self._clock = 0
         self._redo.clear()
-        self.events.clear()
+        self.system_events.clear()
+        self.actions.new_session()
         return removed
 
-    # ---- history & reproducibility ---------------------------------------------------------------------
-    def log(self, event: str, ids: Sequence[str], text: str) -> None:
-        """Record a non-structural event (e.g. a payload was released to save memory)."""
-        self._log(event, ids, text)
-
-    def _log(self, event: str, ids: Sequence[str], text: str) -> None:
-        self.events.append({"n": self._clock, "event": event, "states": list(ids), "text": text,
-                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+    # ---- system trace & reproducibility ---------------------------------------------------------------------
+    def note_system(self, event: str, ids: Sequence[str], text: str) -> None:
+        """Note something the *system* did on its own (a payload re-computed, memory freed
+        to stay in budget). This is a technical trace, not the processing history."""
+        self.system_events.append({"event": event, "states": list(ids), "text": text,
+                                   "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        del self.system_events[:-500]
 
     def recipe(self, sid: str) -> List[Dict[str, Any]]:
         """The operations that produce state `sid` from the loaded data, in
@@ -408,12 +354,14 @@ class ProcessingGraph:
                  "inputs": dict(s.inputs), "fingerprint": s.fingerprint} for s in chain]
 
     def export(self) -> Dict[str, Any]:
-        """A JSON-able snapshot of the whole history (no arrays)."""
+        """A JSON-able snapshot: the data states, the current pointers, and the action log
+        in chronological order (no arrays)."""
         return {
             "states": [{"id": s.id, "kind": s.kind, "op": s.op, "variant": s.variant,
                         "version": s.version, "params": s.params, "inputs": dict(s.inputs),
                         "fingerprint": s.fingerprint, "seq": s.seq, "timestamp": s.timestamp,
                         "notes": s.notes, "info": jsonable(s.info)} for s in self],
             "current": {k: (self.current(k).id if self.current(k) else None) for k in KINDS},
-            "events": list(self.events),
+            "actions": self.actions.to_dicts(),
+            "action_log_problems": self.actions.verify(),
         }

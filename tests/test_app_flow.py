@@ -150,4 +150,15 @@ check(at, "compute attribute")
 at.radio(key="active_page").set_value("💾 Export").run()
 check(at, "nav to Export")
 
+# ---- History ----
+at.radio(key="active_page").set_value("🕘 History").run()
+check(at, "nav to History")
+log = at.session_state["graph"].actions
+assert len(log) > 10 and log.verify() == [], "action log empty or failed its integrity check"
+assert [e.n for e in log.entries()] == list(range(1, len(log) + 1)), "action numbers are not dense"
+at.radio(key="history_page_order").set_value("newest").run()
+check(at, "history shown newest first")
+assert [e.n for e in at.session_state["graph"].actions.entries()] == list(range(1, len(log) + 1)), \
+    "display order changed the log"
+
 print("\n🎉 FULL END-TO-END APP WALKTHROUGH SUCCEEDED — no exceptions at any stage")

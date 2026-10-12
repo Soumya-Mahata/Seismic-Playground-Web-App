@@ -23,6 +23,9 @@ pytest tests/test_pipeline.py -v
 # The data-state model and the dependency engine (no seismic data needed)
 pytest tests/test_state_graph.py tests/test_dependencies.py -v
 
+# The processing history (immutable chronological action log) on its own
+pytest tests/test_action_log.py -v
+
 # The same model through the real maths, and through the UI
 pytest tests/test_stage_ops.py tests/test_app_nonlinear.py -v
 
@@ -35,8 +38,8 @@ python tests/test_app_flow.py
 
 All of the above is the validation gate for any change: unit-level numeric
 checks, the state graph and dependency rules, real-maths runs in
-non-standard orders, a full non-UI pipeline run with ground-truth sanity
-checks, and headless `streamlit.testing.v1.AppTest` walkthroughs of every
+non-standard orders, history order == execution order, a full non-UI pipeline
+run with ground-truth sanity checks, and headless `streamlit.testing.v1.AppTest` walkthroughs of every
 page. Run all of them after any change, even a text-only one. With the
 recommended order the results are **bit-for-bit identical** to the original
 linear app — keep it that way (the processing maths in
@@ -47,7 +50,7 @@ must not change as a side effect of workflow work).
 
 ### High-Level Design
 The project is a Streamlit-based interactive platform for 2D land seismic
-processing and interpretation. Four things that a linear pipeline fuses into
+processing and interpretation. Several things that a linear pipeline fuses into
 one are kept **separate** here:
 
 | Idea | Question it answers | Lives in | Can block a run? |
@@ -55,27 +58,34 @@ one are kept **separate** here:
 | Recommended order | "What is the usual sequence?" | `modules/pipeline.PIPELINE_STAGES` | no — display/docs only |
 | Genuine dependencies | "What input must exist for this to compute?" | `modules/dependencies.STAGE_SPECS` (`Need`) | **yes (⛔)** |
 | Recommendations | "What is scientifically preferable?" | `STAGE_SPECS` (`Advice`) + order/repeat/stale checks | no — ⚠ and a *Continue?* prompt |
-| Data states + history | "What data exists, and how was each piece made?" | `modules/state_graph.py` (the graph) + `modules/stage_ops.py` (payloads) | — |
+| Data states | "What data exists, and how was each piece made?" | `modules/state_graph.py` (the graph) + `modules/stage_ops.py` (payloads) | — |
+| Current processing state | "What is the data *now*?" | `dependencies.current_processing_state` (derived from the states) | — |
+| Processing history | "What did the person actually do, in what order?" | `modules/action_log.py` (immutable chronological action log) | — |
 
-See the **Data-state model** section below for the state model, and
-`docs/DEPENDENCY_MODEL.md` for the ⛔/⚠ rules.
+See the **Data-state model** and **Processing history** sections below, and
+`docs/DEPENDENCY_MODEL.md` for the ⛔/⚠ rules. The last three rows are never to
+be derived from one another: the history is *not* the state graph read in a
+different order, the current state is *not* the last history entry, and
+neither follows the recommended order.
 
 ### Folder Structure
 - `app.py`: Main entry point. Handles routing, sidebar navigation, and global CSS.
 - `config.py`: Centralized repository for all default processing parameters (and `STATE_MEMORY_BUDGET_MB`).
 - `modules/`: **Pure computation layer**. No Streamlit dependencies. Contains the physics and math for seismic processing (NMO/DMO, migration, filtering, statics, stacking, regularisation, attributes, etc.) **and** the workflow model:
-    - `state_graph.py`: `DataState`, `ProcessingGraph` — records only, no arrays (see below).
+    - `state_graph.py`: `DataState`, `ProcessingGraph` — records only, no arrays (see below). Owns the `ActionLog` as `graph.actions`.
+    - `action_log.py`: `Action` (frozen entry), `ActionLog` (append-only, hash-chained, `view(order, …)`), text helpers (`format_params`, `format_qc`, `report_lines`) — the processing history (see below).
+    - `canonical.py`: `canonical`/`jsonable`/`array_digest`, shared by the graph (fingerprints) and the log (recorded parameters).
     - `dependencies.py`: the engine that answers ✓/⚠/⛔, resolves which states an operation reads, and detects stale states.
     - `stage_ops.py`: `execute()` and one `run_*` wrapper per operation; owns the payloads (arrays) and the legacy aliases.
     - `pipeline.py`: the recommended-order registry, `STAGE_KIND` (what kind of state each op produces), store defaults, `ALIAS_KEYS`.
 - `visualization/`: **Plotly figure builders**. No Streamlit dependencies. Handles the conversion of seismic data into visual representations, including the shared `theme.py` style tokens and the Petrel-convention `ATTRIBUTE_COLORSCALE_MAP` lookup used by the Attributes page.
 - `views/`: **UI layer**. One module per application page. Contains Streamlit widgets and orchestrates calls between `modules/` and `visualization/`. Views never run processing maths inline: they call `stage_ops.run_*` through `wf.execute`.
 - `utils/`: Shared helpers.
-    - `session_state.py`: Owns the `st.session_state` schema; a thin adapter over the graph and the engine (`graph`, `check`, `current`, `latest`, `result`, `select`, `undo`, `redo`, `discard`, `release`, `best_available_section`).
-    - `workflow_ui.py`: ✓ Available / ⚠ Recommended prerequisite not performed / ⛔ Required input missing banners, the "Continue?" run button (`run_button`), `execute`, the "Choose a different input state" picker, the data-states panel (table + undo/redo/make current/free memory/discard), stale banners, sidebar/home status. Pages must use these rather than gating on `require_stage`.
+    - `session_state.py`: Owns the `st.session_state` schema; a thin adapter over the graph and the engine (`graph`, `check`, `current`, `latest`, `result`, `select`, `undo`, `redo`, `discard`, `release`, `best_available_section`) plus `action_log()` and the display-order setting `history_order()` / `set_history_order()`.
+    - `workflow_ui.py`: ✓ Available / ⚠ Recommended prerequisite not performed / ⛔ Required input missing banners, the "Continue?" run button (`run_button`), `execute`, the "Choose a different input state" picker, the data-states panel (table + undo/redo/make current/free memory/discard), stale banners, sidebar/home status; and the **current-state panel** (`current_state_panel`), the **history table** (`history_table`, `sidebar_history`) with its explicit oldest/newest control (`history_order_control`). Pages must use these rather than gating on `require_stage`.
     - `click_picking.py`: `numeric_point_form()` — a small (x, y) + "Add point" form used for all point-entry (horizons, faults, velocity picks, F-K polygon). Plotly/Streamlit can't deliver click-selection events on `go.Heatmap` traces, so every one of these panels uses this form instead of a literal click.
-    - `io_export.py`: SEG-Y, CSV, NumPy, and the processing report / state-graph JSON / replayable recipe JSON.
-- `tests/`: `test_pipeline.py` (numeric unit tests of the maths), `test_state_graph.py` (the graph: identity, current pointers, undo/redo, lineage, discard), `test_dependencies.py` (engine on a bare graph: ⛔/⚠/✓, stale, order independence), `test_stage_ops.py` (real maths: non-standard orders, repeat/branch/memoise/no-copy/release/undo/discard/replay), `test_app_nonlinear.py` (UI: ⚠ confirm / ⛔ block, states panel, input picker), `test_app_flow.py` (AppTest walkthrough of the recommended order), `manual_pipeline_check.py` (non-UI full run with ground-truth checks).
+    - `io_export.py`: SEG-Y, CSV, NumPy, and the processing report (current state · action log · data states) / state-graph JSON / replayable recipe JSON / action-log CSV and JSON.
+- `tests/`: `test_pipeline.py` (numeric unit tests of the maths), `test_action_log.py` (the history on its own: order, immutability, tamper detection, views), `test_state_graph.py` (the graph: identity, current pointers, undo/redo, lineage, discard), `test_dependencies.py` (engine on a bare graph: ⛔/⚠/✓, stale, order independence), `test_stage_ops.py` (real maths: non-standard orders, repeat/branch/memoise/no-copy/release/undo/discard/replay, history == execution order), `test_app_nonlinear.py` (UI: ⚠ confirm / ⛔ block, states panel, input picker, History page and display order), `test_app_flow.py` (AppTest walkthrough of the recommended order), `manual_pipeline_check.py` (non-UI full run with ground-truth checks).
 
 ### Key Technical Patterns
 - **Workflow order (recommended, not enforced)**: Pre-stack conditioning runs in the **shot domain** (band-pass → AGC → trace edit/kill/de-spike → mute → balance → F-K dip filter → multiple suppression → deconvolution), then **CDP Sort & Binning**, then velocity analysis pass 1 → NMO → residual statics → DMO → inverse NMO → data regularisation → velocity analysis pass 2 → final NMO → stack → post-stack processing (random noise attenuation → decon → time-variant filter) → migration (post-stack Kirchhoff, or pre-stack Kirchhoff time migration on CDP gathers before stack) → final scaling. The full ordered stage list lives in `modules/pipeline.PIPELINE_STAGES`. A stage runs whenever its **genuine** inputs exist; a skipped or out-of-order *recommended* step only produces a ⚠ "Continue?" — never a block.
@@ -126,7 +136,7 @@ A dict of `DataState` records plus queries; plain Python, picklable, no arrays, 
 - **lineage(sid)** — the chain of states the data was built through (following `data` inputs): "what has been applied to this data?". **ancestors / dependents(sid)** — through *any* input role: "what does this depend on / what is built from it?".
 - **undo(kind)** moves the current pointer to the `data` input if it is the same kind; **redo** walks back; any new state or deliberate `select` ends the redo history. Nothing is deleted or recomputed.
 - **discard(sid)** removes a state and every dependent (then `stage_ops.discard_state` frees their arrays).
-- **recipe(sid)**, **export()**, event log (`select`/`undo`/`redo`/`discard`/`release`/`materialize`).
+- **recipe(sid)**, **export()** (states, current pointers, and the action log with its integrity check). `graph.actions` is the processing history (below); `graph.system_events` holds only what the *system* did (re-materialising a state, the memory budget releasing old ones) and is not history.
 
 ### Where the arrays live (`modules/stage_ops.py`) — no input copies
 ```
@@ -157,10 +167,47 @@ One generic path for every operation:
 | Branching / operating on an earlier state | `inputs={'data': 'S1'}` or the "Choose a different input state" picker; both branches coexist | `test_two_branches_from_the_same_state_coexist` |
 | Downstream dependency detection | `graph.dependents(sid)` through any input role; the states panel lists what a discard would also remove | `test_the_dependents_of_a_state_are_found_through_any_input_role` |
 | Stale-state detection | `dependencies.stale_info`: a state is stale when the input each *tracked* `Need` would resolve to today differs from the one it recorded — reasons `behind`, `replaced`, `rolled_back`, `diverged`, `inherited` (transitive). Nothing is discarded: stale = valid data not built from the latest inputs | `test_rerunning_velocity_keeps_the_old_states…`, `test_undoing_marks_…` |
-| Processing history | The graph in `seq` order; report, state-graph JSON and per-state recipe JSON on the Export page | `test_history_and_exports…` |
+| Processing history | The immutable action log (`graph.actions`) — *not* the graph in `seq` order; see **Processing history** below. Report, state-graph JSON, action-log CSV/JSON and per-state recipe JSON on the Export page | `test_action_log.py`, the history tests in `test_stage_ops.py`, `test_history_and_exports…` |
 | Undo / redo | Pointer moves only (`stage_ops.undo/redo`, states panel); undone states stay in the graph; released states are re-computed on the way | `test_undo_and_redo_only_move_the_pointer`, UI tests |
 | Reproducibility | `graph.recipe(sid)` → `stage_ops.replay_recipe(store, sid)` re-runs the recorded ops with their parameters in a **new** store and checks every lineage fingerprint (`GraphError` if the survey or the maths differ). Manual velocity picks / excluded CDPs are recorded in full as parameters; the `upload` state records source, size, dt and a data digest | `test_a_recipe_replays_to_the_identical_result` |
 | Memory | no input copies; `release_payload` / `materialize` (re-compute from the record); optional LRU budget that never releases the current state of any kind | `test_release_then_materialize…`, `test_a_memory_budget…` |
+
+## Processing history (the immutable action log)
+
+**The history is a record of what the person did, in the exact order they did it.** It is a separate object from the data states (`modules/action_log.py`, `graph.actions`) so that nothing about the data — lineage, branching, undo, discard, the recommended order — can change what it says.
+
+```
+AGC → Band-pass → Mute → F-K filter → Band-pass again      (what the user ran)
+#1 AGC · #2 Band-pass · #3 Mute · #4 F-K · #5 Band-pass    (what the history says — always)
+```
+
+### Three questions, three places — never mix them up
+| Question | Answer comes from | Order |
+|---|---|---|
+| What **is** the data now? (*current processing state*) | `dependencies.current_processing_state(wf)` ← states + current pointers | a lineage, e.g. `Raw → AGC → Band-pass` |
+| What is **usually** done? (*recommended workflow*) | `pipeline.PIPELINE_STAGES`, status panels | the textbook order |
+| What was **actually done**? (*history*) | `graph.actions` (`ActionLog`) | execution order (action number) |
+
+After an *undo* the current state moves back and the history gains an `Undo` entry; running steps in a non-textbook order changes the history only by appending. The UI labels each (sidebar: "Current processing state", "Recommended workflow", "Processing history"; Home page and the History page likewise).
+
+### The entry (`Action`, frozen)
+`n` (action number, 1, 2, 3 … — **this is the order**, not the clock), `timestamp`, `session` (dataset number), `kind` (`operation` | `undo` | `redo` | `select` | `discard` | `release`), `action`/`label`/`variant` (which operation), `params` (complete, canonical JSON), `inputs` (role → input state id; for navigation, the state left), `output` (state produced / re-used / moved to; `None` on failure), `status` (`success`/`failure`), `reused`, `failure_kind` (`blocked` ⛔, `invalid`, `error`), `error`, `qc` (RMS in → out, non-finite samples, the operation's own scalar diagnostics, velocity range), `warnings` (the ⚠ the run went ahead despite), `affected` (discard: every state removed), `detail`, and the hash chain (`prev_hash`, `hash`).
+
+### What is, and is not, an entry
+- **Entries:** every execution of an operation — a repeat is another entry, and so is an identical re-run that found an existing state and re-used it (`reused=True`); every blocked / invalid / failed attempt (a failure never consumes a state id); loading data and building gathers (`upload`, `shot_gathers`); undo, redo, make-current that actually move a pointer; discard; the person's *Free memory*.
+- **Not entries (`graph.system_events`):** the memory budget releasing old states, and re-materialising a released state. The person did not do these. No-op navigation (undo with nothing to undo) is not logged either.
+- Loading a new survey starts a new **dataset session**: states restart at `S0`, the log keeps the earlier session's entries (action numbers continue), `view(session=…)` / the UI toggle separate them.
+
+### Immutability
+- `Action` is a frozen dataclass of immutable values (params and QC are stored as JSON text, inputs as a tuple of pairs); `ActionLog` has no method that edits, reorders or removes an entry — only `record` and `new_session`.
+- Python cannot forbid a determined edit, so the log is **hash-chained** (each entry's SHA-1 covers its content and the previous hash). `ActionLog.verify()` reports edited, removed, inserted or reordered entries; the History page shows the result and the JSON export carries it.
+- Discarding a state removes the state, **not** the entries that created or used it; the later `discard` entry names what was removed and `ActionLog.discarded_by(entry)` links them.
+
+### Display order
+`view(order="oldest"|"newest", kinds=…, session=…, issues_only=…)` returns a **sorted copy**; sorting is by action number. The user setting (`st.session_state["history_order"]`, `ss.history_order()` / `ss.set_history_order()`, default *oldest first*) is shown by `wf.history_order_control(key)` on the sidebar, Home and History pages — one shared setting; each control must set its own widget key from the setting *before* instantiating the widget. It affects only how lists are drawn: the log, the action numbers, and **every export** (report, JSON, CSV) stay chronological.
+
+### Where entries come from
+Only `modules/stage_ops.py` writes the log: `execute()` (success, reuse, blocked, invalid parameters, compute error), `_refuse()` (argument validation in a `run_*` wrapper), `run_load_survey`, `select_state`/`undo`/`redo`/`discard_state`, `release_payload(actor="user")`. A new operation therefore needs **no** logging code — if it goes through `execute()` it is recorded with its parameters, inputs, output, QC and warnings. Pages never call `ActionLog.record`.
 
 ### Invariants — do not break these
 - **Never mutate a state's arrays in place** and never write into another state's keys. A compute function writes only under `run.key(...)`.
@@ -170,17 +217,20 @@ One generic path for every operation:
 - **Pages read via `wf.result()` / `ss.*`, never by guessing keys.** The legacy aliases exist for convenience and always reflect the current/latest state; new code should take arrays from the state (`ss.gathers(state)`, `ss.section(state)`, `ss.blob(state, name)`, `state.keys[...]`).
 - `wf.result()` returns `None` (with a "Re-compute" note) while the state, or the state it was made from, is released — a page drawing itself must not silently undo a deliberate *Free memory*.
 - Every state a page displays must have its *input* state's arrays too (before/after panels) — `wf.result` checks both.
+- **Never edit, reorder, merge, or delete an action-log entry, and never record one outside `stage_ops`.** Do not derive the history from the state graph (or the current state from the history), and do not let the recommended order, the data lineage, or the display setting influence the order of `graph.actions`. A feature that needs "history" in another order (newest first, grouped, filtered) uses `ActionLog.view(...)`.
 - `st.session_state` is the store; keep `modules/` free of Streamlit imports (`stage_ops` takes any mutable mapping, which is how the tests run the real pipeline with a plain dict from `stage_ops.new_store(survey)`).
 
 ### Adding a stage
 1. Add a `Stage` to `PIPELINE_STAGES` at its recommended position, and its kind to `pipeline.STAGE_KIND`.
 2. Add a `StageSpec` in `dependencies.STAGE_SPECS`: its `Need`s (genuine inputs — `track=True` for those whose supersession should make a finished state stale) and `Advice` (recommendations). `Advice` pairs must agree with `PIPELINE_STAGES` order (asserted by a test) and the recommended order must stay warning-free. If it transforms a stream, it joins `STREAM_MEMBERS` automatically through `STAGE_KIND`.
 3. Write the compute function with `@_op("stage_id")` in `stage_ops.py` — read via `run.in_key(...)`, write via `run.key(...)`/`run.put(...)`, return `(keys, info)` — plus a `run_<stage>` wrapper that builds the **complete** parameter dict and calls `execute`. Add any legacy alias to `sync_aliases` and `pipeline.ALIAS_KEYS`.
-4. Add a view with `wf.show_status` / `wf.run_button` / `wf.execute(stage_ops.run_…)`, display with `wf.result(...)`, and `wf.states_panel([...kinds…], key)`.
+4. Add a view with `wf.show_status` / `wf.run_button` / `wf.execute(stage_ops.run_…)`, display with `wf.result(...)`, and `wf.states_panel([...kinds…], key)`. The action log needs nothing from the view: `execute()` records the run (and any refusal) itself. A `run_*` wrapper that rejects its own arguments before reaching `execute` must do so with `_refuse(...)` so the attempt is recorded.
 5. Add tests; the registry tests fail if a stage lacks a spec or an executor, or if its advice contradicts the recommended order. Re-run the equivalence check against the previous version if any maths is touched.
 
 ## Known, deliberate design decisions
 (See README.md "Design notes" for the full write-up.)
+- **The history is its own object, not a view of the graph.** The state graph answers "what exists / how was it made" and is rewritten by discard and reset; the action log answers "what did the person do" and only ever grows. A reused (memoised) run adds a log entry but no state; a failed run adds a log entry but no state; a discard removes states but no entries.
+- **History order is the action number.** Timestamps are recorded but never used for ordering (they can tie, and a clock can move).
 - NMO uses `np.interp(tn, t0_grid, trace)` as the forward-warp convention; `inverse_nmo_correction` uses the swapped convention (`np.interp(t0, tn_grid, trace)`), verified with a direct forward-then-inverse round-trip test. Getting this right matters because `nmo_correction` runs at both velocity-analysis passes and `inverse_nmo_correction` feeds the 2nd pass.
 - The velocity auto-picker is a confidence-gated local walk along the semblance ridge rather than a whole-path dynamic-programming picker — see `modules/velocity.py`.
 - Post-stack random noise attenuation uses a spatial (across-CDP) median filter as a stand-in for F-X deconvolution, which needs higher-fold data than a small synthetic/demo line provides.

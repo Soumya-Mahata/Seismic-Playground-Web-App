@@ -14,7 +14,17 @@ several different ideas into one. They are now separate:
 | **Genuine dependencies** | "What input does this computation need to exist?" | `modules/dependencies.STAGE_SPECS` → `Need` | **Yes (⛔)** |
 | **Recommendations** | "What is scientifically preferable before/after this?" | `STAGE_SPECS` → `Advice`, plus the order / repeat / stale checks | No — a ⚠ and a *Continue?* prompt |
 | **Data states** | "What data exists, and how was each piece made?" | `modules/state_graph.py` (`DataState`, `ProcessingGraph`) | — |
-| **Processing history** | "What was run, in what order, on what?" | the states, in creation order | — |
+| **Current processing state** | "What is the data *now*?" | `dependencies.current_processing_state` — derived from the states and their current pointers | — |
+| **Processing history** | "What did the person actually do, in what order?" | `modules/action_log.py` — an immutable, chronological action log | — |
+
+The last three rows are the ones most easily confused. The **history** is
+what was *done*, in the exact order it was done (`AGC, Band-pass, Mute, F-K,
+Band-pass` stays exactly that — nothing is reordered to match the recommended
+order, repeats are separate entries, failed attempts and undo/redo/discard are
+entries too). The **current processing state** is what the data *is* now (e.g.
+`Raw → AGC → Band-pass → Mute`, after an undo it moves back while the history
+only grows). The **recommended order** is only what is *usually* done. None is
+computed from another, and the app shows them in separate places.
 
 Every operation is `INPUT STATE → OPERATION + PARAMETERS → OUTPUT STATE`; a
 state is never edited or overwritten. The state model itself (identity,
@@ -34,7 +44,7 @@ rules that decide ✓ / ⚠ / ⛔ on top of it.
 Every processing page shows its operation's status as a banner, plus **📥
 Reads: …** — the data state(s) the run will consume — and a *Choose a
 different input state* selector when there is a real choice. The sidebar
-("Workflow status") and Home page show all operations at once. The current
+("Recommended workflow") and Home page show all operations at once. The current
 data is printed as a chain, e.g. `📍 Current shot-domain data: Raw → Band-pass → F-K`.
 After a run the page says which state it produced and from which
 (`✅ Produced Band-pass (S3) from Raw (S1).`), or, if the identical

@@ -716,7 +716,8 @@ def test_undo_and_redo_only_move_the_pointer(shots):
     assert so.redo(shots, "shot").id == b.id and so.redo(shots, "shot").id == c.id
     assert so.redo(shots, "shot") is None
     assert len(g) == n and footprint(shots)[1] == keys                    # nothing deleted, nothing recomputed
-    assert [e["event"] for e in g.events].count("undo") == 2
+    kinds = [e.kind for e in g.actions.entries()]
+    assert kinds.count("undo") == 2 and kinds.count("redo") == 2      # the pointer moves are logged
 
 
 def test_undo_stops_at_the_base_gathers(shots):
@@ -1022,8 +1023,10 @@ def test_history_and_exports_list_steps_in_creation_order_with_inputs(shots):
     assert [s.seq for s in g] == sorted(s.seq for s in g)
 
     report = io_export.processing_report_text({"Source": "synthetic"}, g)
-    assert report.index("Amplitude Recovery") < report.index("Band-Pass Filter") < report.index("Mute")
-    assert f"consumed: data={agc.id}" in report and "fingerprint:" in report
+    log_text = report[report.index("ACTION LOG"):report.index("DATA STATES")]
+    assert log_text.index("Amplitude Recovery") < log_text.index("Band-Pass Filter") < log_text.index("Mute")
+    states_text = report[report.index("DATA STATES"):]
+    assert f"consumed: data={agc.id}" in states_text and "fingerprint:" in states_text
 
     payload = json.loads(io_export.params_json_bytes(g))
     assert [s["op"] for s in payload["states"]] == ["upload", "shot_gathers", "agc", "bandpass", "mute"]
@@ -1038,3 +1041,328 @@ def test_the_report_for_one_state_lists_only_what_produced_it(shots):
     so.run_agc(shots)
     report = io_export.processing_report_text({}, so.graph(shots), state_id=bp.id)
     assert "Band-Pass Filter" in report and "Amplitude Recovery" not in report
+    assert report.count("Band-Pass Filter") >= 1 and "ACTION LOG — the operations that produced" in report
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# The processing history is an immutable, chronological action log
+# ─────────────────────────────────────────────────────────────────────────
+#
+# History (what was done, in order) is kept apart from the current state (what the data is now)
+# and from the recommended workflow (what is usually done). Pure properties of the log are in
+# tests/test_action_log.py; these run real operations through it.
+
+from modules.dependencies import current_processing_state          # noqa: E402
+from modules.pipeline import STAGE_INDEX                            # noqa: E402
+
+SHOT_RUNNERS = {
+    "agc": lambda s, **kw: so.run_agc(s, **kw),
+    "bandpass": lambda s, **kw: so.run_bandpass(s, **kw),
+    "mute": lambda s, **kw: so.run_mute(s, "flat", **kw),
+    "balance": lambda s, **kw: so.run_balance(s, **kw),
+    "despike": lambda s, **kw: so.run_despike(s, **kw),
+}
+
+
+def alog(store):
+    return so.action_log(store)
+
+
+def op_entries(store):
+    """The processing operations in the history, in the order recorded (failures included)."""
+    return alog(store).operations()
+
+
+def run_in_order(store, sequence):
+    for stage in sequence:
+        SHOT_RUNNERS[stage](store)
+
+
+def test_the_history_is_exactly_the_order_the_user_ran_the_operations(shots, survey):
+    """AGC → Band-pass → Mute → F-K → Band-pass again. Nothing is moved to the 'recommended' place."""
+    so.run_agc(shots)
+    so.run_bandpass(shots)
+    so.run_mute(shots, "flat")
+    so.run_fk(shots, fk_polygon(survey))
+    so.run_bandpass(shots)
+
+    entries = alog(shots).entries()
+    assert [e.action for e in entries] == ["upload", "shot_gathers", "agc", "bandpass", "mute", "fk",
+                                           "bandpass"]
+    assert [e.n for e in entries] == list(range(1, 8))
+    assert entries[3].label == entries[6].label and entries[3].label != entries[2].label
+    performed = [e.action for e in entries][2:]
+    assert performed == ["agc", "bandpass", "mute", "fk", "bandpass"]
+    # …which is NOT the recommended seismic order (band-pass is recommended before AGC and mute)
+    recommended = [STAGE_INDEX[a] for a in performed]
+    assert recommended != sorted(recommended)
+    # each entry says which state it read and which it made, and they chain in the order performed
+    ops_ = [e for e in entries if e.action in {"agc", "bandpass", "mute", "fk"}]
+    for before, after in zip(ops_, ops_[1:]):
+        assert after.input_state == before.output
+    assert [e.output for e in entries] == [s.id for s in so.graph(shots)]       # one state per action here
+    assert alog(shots).verify() == []
+
+
+@pytest.mark.parametrize("sequence", [
+    ["mute", "agc", "bandpass", "bandpass", "balance", "agc"],      # repeats, reversed recommendation
+    ["balance", "mute", "bandpass", "despike"],
+    ["bandpass", "agc", "mute", "balance"],                         # the textbook order
+])
+def test_any_order_the_user_chooses_is_the_order_recorded(shots, sequence):
+    run_in_order(shots, sequence)
+    assert [e.action for e in op_entries(shots)][2:] == sequence
+    assert [e.n for e in alog(shots).entries()] == list(range(1, len(sequence) + 3))
+    # the display setting is only a view of that
+    assert [e.action for e in alog(shots).view("oldest")][2:] == sequence
+    assert [e.action for e in alog(shots).view("newest")][:-2] == sequence[::-1]
+    assert [e.action for e in alog(shots).entries()][2:] == sequence       # …and did not touch the log
+
+
+def test_the_same_operation_run_twice_is_two_entries_and_two_states(shots):
+    a = so.run_bandpass(shots)
+    b = so.run_bandpass(shots)                                              # reads a's output: a new state
+    runs = [e for e in op_entries(shots) if e.action == "bandpass"]
+    assert [e.output for e in runs] == [a.id, b.id] and a.id != b.id
+    assert runs[1].input_state == a.id and runs[0].n < runs[1].n
+    assert runs[0].output == a.id                                            # the first entry is untouched
+
+
+def test_an_identical_rerun_is_still_its_own_entry_even_though_nothing_is_recomputed(shots):
+    sg = latest(shots, "shot_gathers")
+    first = so.run_agc(shots, inputs={"data": sg.id})
+    n_states, n_entries = len(so.graph(shots)), len(alog(shots))
+    again = so.run_agc(shots, inputs={"data": sg.id})                       # same op, params and input
+    assert again.id == first.id and len(so.graph(shots)) == n_states        # no new state …
+    assert len(alog(shots)) == n_entries + 1                                # … but a new history entry
+    e1, e2 = [e for e in op_entries(shots) if e.action == "agc"]
+    assert not e1.reused and e2.reused and e1.output == e2.output == first.id
+    assert e1.n < e2.n and e2.status == "success"
+
+
+def test_blocked_and_invalid_attempts_are_in_the_history_when_they_happened(shots):
+    so.run_agc(shots)
+    states_before = len(so.graph(shots))
+    with pytest.raises(DependencyError):
+        so.run_stack(shots)                                                 # no NMO-corrected gathers
+    so.run_bandpass(shots)
+    with pytest.raises(ValidationError):
+        so.run_mute(shots, "bogus")
+    so.run_mute(shots, "flat")
+
+    seq = [(e.action, e.status, e.failure_kind) for e in op_entries(shots)][2:]
+    assert seq == [("agc", "success", ""), ("stack", "failure", "blocked"), ("bandpass", "success", ""),
+                   ("mute", "failure", "invalid"), ("mute", "success", "")]
+    blocked = op_entries(shots)[3]
+    assert blocked.output is None and "NMO-corrected" in blocked.error and not blocked.ok
+    assert len(so.graph(shots)) == states_before + 2                        # only the two successes made states
+    assert [e.n for e in alog(shots).entries()] == list(range(1, 8))        # no gaps for the failures
+
+
+def test_a_failure_does_not_consume_a_state_id(shots):
+    so.run_agc(shots)
+    last_id = list(so.graph(shots))[-1].id
+    with pytest.raises(DependencyError):
+        so.run_stack(shots)
+    nxt = so.run_bandpass(shots)
+    assert int(nxt.id[1:]) == int(last_id[1:]) + 1
+
+
+def test_the_warnings_a_run_went_ahead_despite_are_recorded_with_the_entry(shots):
+    agc = so.run_agc(shots)                                                 # band-pass not applied: ⚠
+    bp = so.run_bandpass(shots)                                             # AGC already applied: ⚠
+    mute = so.run_mute(shots, "flat")                                       # nothing to warn about
+    e_agc, e_bp, e_mute = [e for e in op_entries(shots) if e.action in ("agc", "bandpass", "mute")]
+    assert e_agc.warnings and "Band-pass" in e_agc.warnings[0]
+    assert e_bp.warnings and "AGC" in e_bp.warnings[0]
+    assert e_mute.warnings == ()
+    assert "Run despite" in agc.notes and "Run despite" in bp.notes and not mute.notes
+
+
+def test_every_successful_entry_carries_input_output_parameters_and_qc(shots):
+    agc = so.run_agc(shots, window=300)
+    e = [x for x in op_entries(shots) if x.action == "agc"][0]
+    d = e.to_dict()
+    assert d["n"] == e.n and d["timestamp"] and d["label"]                    # number, time, name
+    assert d["params"] == agc.params and d["params"]["window"] == 300         # complete parameters
+    assert d["input_state"] == latest(shots, "shot_gathers").id and d["output_state"] == agc.id
+    assert d["status"] == "success" and d["failure_kind"] == ""
+    qc = d["qc"]
+    assert qc["rms_in"] > 0 and qc["rms_out"] > 0 and qc["non_finite"] == 0  # QC summary
+    assert d["detail"] and e.input_state == agc.inputs["data"]
+
+
+def test_the_qc_summary_reports_non_finite_samples(shots):
+    agc = so.run_agc(shots)
+    assert so.qc_summary(shots, agc)["non_finite"] == 0
+    gather = next(iter(so.gathers_of(shots, agc).values()))
+    gather[agc.keys["traces"]][0, 0] = np.nan                               # corrupt one sample on purpose
+    qc = so.qc_summary(shots, agc)
+    assert qc["non_finite"] == 1
+    from modules.action_log import format_qc
+    assert "⚠ 1 non-finite sample(s)" in format_qc(qc)
+
+
+def test_the_upload_and_gather_building_are_the_first_actions_of_a_dataset(shots):
+    first, second = alog(shots).entries()[:2]
+    assert (first.action, first.output, first.input_state) == ("upload", "S0", None)
+    assert (second.action, second.input_state, second.output) == ("shot_gathers", "S0", "S1")
+    assert first.qc["traces"] > 0 and first.qc["samples"] > 0 and first.qc["dt_ms"] > 0
+
+
+def test_undo_redo_and_make_current_are_logged_in_sequence(shots):
+    a, b = so.run_bandpass(shots), so.run_agc(shots)
+    so.undo(shots, "shot")
+    so.redo(shots, "shot")
+    so.select_state(shots, a.id)
+    tail = alog(shots).entries()[-3:]
+    assert [(e.kind, e.input_state, e.output) for e in tail] == [
+        ("undo", b.id, a.id), ("redo", a.id, b.id), ("select", b.id, a.id)]
+    assert all(e.status == "success" and not e.is_operation for e in tail)
+
+
+def test_navigation_that_changes_nothing_is_not_logged(shots):
+    so.run_bandpass(shots)
+    so.undo(shots, "shot")
+    n = len(alog(shots))
+    assert so.undo(shots, "shot") is None                                   # nothing left to undo
+    assert so.redo(shots, "cdp") is None
+    assert len(alog(shots)) == n
+
+
+def test_discarding_a_state_keeps_the_entries_that_made_it_and_says_what_was_removed(shots):
+    a, b, c = so.run_bandpass(shots), so.run_agc(shots), so.run_mute(shots, "flat")
+    before = alog(shots).entries()
+    removed = so.discard_state(shots, b.id)
+    log = alog(shots)
+    assert log.entries()[:len(before)] == before                            # nothing earlier changed or vanished
+    gone = log[len(before) + 1]
+    assert gone.kind == "discard" and set(gone.affected) == set(removed) == {b.id, c.id}
+    assert [log.discarded_by(e) is not None for e in before if e.output in (a.id, b.id, c.id)] == [
+        False, True, True]
+    assert b.id not in {s.id for s in so.graph(shots)}                      # the state is gone …
+    assert any(e.output == b.id for e in before)                            # … its history entry is not
+    assert log.verify() == []
+
+
+def test_freeing_memory_is_logged_but_the_budget_and_recomputation_are_system_events(shots):
+    bp = so.run_bandpass(shots)
+    agc = so.run_agc(shots)
+    so.run_mute(shots, "flat")
+    n = len(alog(shots))
+    so.enforce_budget(shots, 1)                                             # the system frees old states
+    assert len(alog(shots)) == n and so.graph(shots).system_events          # not the person's doing
+    so.materialize(shots, bp.id)                                            # re-computation on demand
+    assert len(alog(shots)) == n
+    so.release_payload(shots, bp.id)                                        # the person pressed "Free memory"
+    last = alog(shots).entries()[-1]
+    assert last.kind == "release" and last.input_state == bp.id and len(alog(shots)) == n + 1
+    assert last.qc["freed_mb"] >= 0 and agc.id != bp.id
+
+
+def test_the_history_is_not_the_current_state_and_is_not_the_recommended_workflow(shots):
+    so.run_agc(shots)
+    so.run_bandpass(shots)
+    so.undo(shots, "shot")                                                  # current data goes back to AGC
+    wf = so.workflow(shots)
+    rows = {r["kind"]: r for r in current_processing_state(wf)}
+    assert rows["shot"]["applied"] == "Raw → AGC"                           # where the data IS
+    performed = [e.action for e in op_entries(shots)][2:]
+    assert performed == ["agc", "bandpass"]                                 # what was DONE (band-pass included)
+    assert alog(shots).entries()[-1].kind == "undo"                         # and the undo that moved us back
+    # the recommendation is a third, independent thing: it puts band-pass first
+    assert STAGE_INDEX["bandpass"] < STAGE_INDEX["agc"]
+
+
+def test_the_current_state_follows_the_pointer_while_the_history_only_grows(shots):
+    run_in_order(shots, ["bandpass", "agc", "mute"])
+    sizes = [len(alog(shots))]
+    for move in (lambda: so.undo(shots, "shot"), lambda: so.undo(shots, "shot"),
+                 lambda: so.redo(shots, "shot")):
+        move()
+        sizes.append(len(alog(shots)))
+    assert sizes == sorted(sizes) and len(set(sizes)) == len(sizes)         # strictly growing
+    now = {r["kind"]: r["applied"] for r in current_processing_state(so.workflow(shots))}
+    assert now["shot"] == "Raw → Band-pass → AGC"
+
+
+def test_loading_a_new_survey_starts_a_new_dataset_but_keeps_the_earlier_history(shots, survey):
+    run_in_order(shots, ["agc", "bandpass"])
+    earlier = alog(shots).entries()
+    other = generate_synthetic_survey(n_stations=60, shot_interval_stations=1, channels_per_side=15,
+                                      seed=7, source_name="other.sgy")
+    so.run_load_survey(shots, other, "other.sgy")
+    log = alog(shots)
+    assert log.entries()[:len(earlier)] == earlier                          # the old dataset's history survives
+    assert [(s.id, s.op) for s in so.graph(shots)] == [("S0", "upload")]    # while its states are gone
+    assert log.entries()[-1].action == "upload" and log.entries()[-1].session == 2
+    assert [e.n for e in log.entries()] == list(range(1, len(earlier) + 2))
+    assert log.view(session=log.session)[0].n == len(earlier) + 1
+    so.run_build_shot_gathers(shots)
+    so.run_agc(shots)
+    assert [e.action for e in log.view(session=2)] == ["upload", "shot_gathers", "agc"]
+    assert log.verify() == []
+
+
+def test_resetting_the_store_does_not_erase_the_log(shots):
+    run_in_order(shots, ["agc"])
+    n = len(alog(shots))
+    so.reset_store(shots)
+    assert len(alog(shots)) == n and alog(shots).verify() == []
+
+
+def test_a_replay_in_a_new_store_logs_its_own_history_in_recipe_order(shots):
+    run_in_order(shots, ["bandpass", "agc", "mute"])
+    cdp_state = so.run_cdp_sort(shots, N_MIN)
+    original = alog(shots).entries()
+    new, _ = so.replay_recipe(shots, cdp_state.id)
+    replayed = [e.action for e in alog(new).entries() if e.is_operation]
+    assert replayed == [s["op"] for s in so.graph(shots).recipe(cdp_state.id)]
+    assert replayed[-3:] == ["agc", "mute", "cdp_sort"] and alog(new).verify() == []
+    assert alog(shots).entries() == original                                # the original log is untouched
+
+
+def test_history_order_follows_execution_not_state_ids_or_lineage(shots):
+    """Branching off an earlier state: the entry for the branch comes when it was RUN."""
+    sg = latest(shots, "shot_gathers")
+    a = so.run_agc(shots)
+    b = so.run_bandpass(shots)                                              # on top of AGC
+    c = so.run_bandpass(shots, inputs={"data": sg.id})                      # branch off the base gathers, later
+    e_b, e_c = [e for e in op_entries(shots) if e.action == "bandpass"]
+    assert e_b.n < e_c.n and (e_b.input_state, e_c.input_state) == (a.id, sg.id)
+    assert [e.output for e in op_entries(shots)][2:] == [a.id, b.id, c.id]
+
+
+def test_the_report_lists_the_action_log_chronologically_even_when_states_are_branched(shots):
+    sg = latest(shots, "shot_gathers")
+    so.run_agc(shots)
+    so.run_bandpass(shots, inputs={"data": sg.id})
+    so.run_mute(shots, "flat")
+    so.run_bandpass(shots)
+    report = io_export.processing_report_text({"Source": "synthetic"}, so.graph(shots))
+    head, rest = report.index("CURRENT PROCESSING STATE"), report.index("ACTION LOG")
+    assert head < rest < report.index("DATA STATES")                       # three sections, kept apart
+    log_text = report[rest:report.index("DATA STATES")]
+    marks = [log_text.index(f"#{e.n} ") for e in alog(shots).entries()]
+    assert marks == sorted(marks) and log_text.count("Band-Pass Filter") == 2
+    assert "input: data=" in log_text and "parameters:" in log_text and "QC: RMS" in log_text
+
+
+def test_the_json_export_contains_the_action_log_in_execution_order(shots):
+    run_in_order(shots, ["agc", "bandpass", "bandpass"])
+    payload = json.loads(io_export.params_json_bytes(so.graph(shots)))
+    assert [a["action"] for a in payload["actions"]][2:] == ["agc", "bandpass", "bandpass"]
+    assert [a["n"] for a in payload["actions"]] == list(range(1, 6))
+    assert payload["action_log_problems"] == []
+    assert payload["actions"][3]["output_state"] != payload["actions"][4]["output_state"]
+    assert "events" not in payload                                          # the old event list is gone
+
+
+def test_the_csv_export_matches_the_log_row_for_row(shots):
+    import csv
+    import io
+    run_in_order(shots, ["mute", "agc"])
+    rows = list(csv.DictReader(io.StringIO(io_export.action_log_csv_bytes(alog(shots)).decode())))
+    assert [r["operation"] for r in rows] == [e.label for e in alog(shots).entries()]
+    assert [int(r["action_number"]) for r in rows] == [e.n for e in alog(shots).entries()]
+    assert rows[-1]["input_state"] and rows[-1]["output_state"] and rows[-1]["result"] == "✓ success"

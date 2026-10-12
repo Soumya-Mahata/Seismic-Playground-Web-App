@@ -113,10 +113,24 @@ available (see "Synthetic test data" below).
   new states add one array per gather and never copy their input, and old
   states can be freed and re-computed on demand. See "Data-state model" in
   [`CLAUDE.md`](CLAUDE.md).
-- **Processing history** — every state is listed in the order it was
-  *produced* with its operation, parameters, the state(s) it consumed and
-  any ⚠ it went ahead despite; exported as a report, as JSON, and as a
-  replayable recipe for any one state.
+- **Processing history = an immutable chronological action log** — the
+  history is the *exact order the actions were performed*, never the
+  recommended seismic order. If you run AGC, Band-pass, Mute, F-K filter and
+  Band-pass again, it reads exactly `#1 AGC · #2 Band-pass · #3 Mute · #4 F-K ·
+  #5 Band-pass`. Every action is its own entry — repeats and identical
+  re-runs included, failed or blocked attempts included, and undo / redo /
+  make-current / discard / free-memory too — with its action number, time,
+  operation, parameters, input and output state, success or failure, QC
+  summary (RMS in → out, non-finite samples, operation diagnostics) and the
+  ⚠ it went ahead despite. Entries are never edited, reordered or removed
+  (they are frozen records in a hash chain that `verify()` checks), and
+  discarding a state leaves the entries that made it. A reader-chosen
+  *oldest first / newest first* setting changes only how the list is
+  displayed. Kept apart from it: the concise **Current processing state**
+  (what the data is *now*) and the **Recommended workflow** (what is
+  *usually* done). The **History** page, the sidebar, the Home page and the
+  Export page (report, JSON, CSV — always chronological) show it; the data
+  states export and the replayable per-state recipe remain.
 
 ---
 
@@ -252,6 +266,10 @@ seismic-playground/
 │   ├── interpretation.py      # horizon/fault data model, curvature, LAS reading,
 │   │                           #   statistical wavelet extraction, well-tie
 │   ├── pipeline.py            # recommended-order stage registry, STAGE_KIND, store defaults
+│   ├── action_log.py          # the processing history: immutable, append-only, chronological
+│   │                           #   action log (frozen entries, hash chain, display-order views)
+│   ├── canonical.py           # canonical parameters + cheap array digests (shared by the
+│   │                           #   state graph and the action log)
 │   ├── state_graph.py         # DataState + ProcessingGraph: INPUT STATE → OPERATION + PARAMETERS
 │   │                           #   → OUTPUT STATE; ids, fingerprints, current pointers, lineage,
 │   │                           #   undo/redo, discard, recipe — pure Python, no arrays
@@ -271,14 +289,16 @@ seismic-playground/
 │   ├── home.py, data_management.py, preprocessing_view.py,
 │   ├── cdp_sort_view.py, velocity_nmo_view.py, stacking_view.py,
 │   ├── poststack_view.py, migration_view.py, interpretation_view.py,
-│   ├── attributes_view.py, export_view.py
+│   ├── attributes_view.py, export_view.py, history_view.py   # history_view: current state + action log
 ├── utils/
 │   ├── session_state.py        # session-state schema + thin adapter over the state graph
 │   ├── workflow_ui.py          # ✓/⚠/⛔ banners, "Continue?" run button, input-state picker,
-│   │                             #   data-states panel (undo/redo/make current/free/discard)
+│   │                             #   data-states panel (undo/redo/make current/free/discard),
+│   │                             #   current-state panel, history table + display-order control
 │   ├── click_picking.py        # shared numeric-entry picking helper (velocity, horizon,
 │   │                             #   fault, F-K polygon all use this one mechanism)
-│   ├── io_export.py            # SEG-Y/CSV/NumPy/HTML/report, state-graph JSON, recipe JSON
+│   ├── io_export.py            # SEG-Y/CSV/NumPy/HTML/report, state-graph JSON, recipe JSON,
+│   │                             #   action-log CSV/JSON
 │   └── formatting.py
 ├── data/sample_data/            # shipped synthetic demo SEG-Y
 ├── docs/DEPENDENCY_MODEL.md     # the ⛔/⚠ dependency rules, in full
@@ -308,16 +328,21 @@ seismic-playground/
   Streamlit setting. Plotly figures are separately forced to a
   consistent white background in `visualization/theme.py`, since a plot
   that inherits the app's dark background loses most colormaps' contrast.
-- **Recommended order ≠ required inputs ≠ data states ≠ history.** These
-  used to be one hard-coded chain (`require_stage` + "stage N done clears
+- **Recommended order ≠ required inputs ≠ data states ≠ current state ≠
+  history.** These used to be one hard-coded chain (`require_stage` + "stage N done clears
   every later stage"). They are now separate: `pipeline.PIPELINE_STAGES`
   is only the recommended order; `dependencies.STAGE_SPECS` declares each
   operation's genuine `Need`s and its `Advice`; and what data *exists* is a
   graph of states (`modules/state_graph.py`) in which every operation
   records the state(s) it consumed, its parameters and the state it
   produced. Pages call `stage_ops.run_*`, which refuse (`DependencyError`)
-  only when a genuine input is missing. Rules: [`docs/DEPENDENCY_MODEL.md`](docs/DEPENDENCY_MODEL.md);
-  state model: [`CLAUDE.md`](CLAUDE.md).
+  only when a genuine input is missing. The *history* is a separate
+  append-only action log (`modules/action_log.py`) written only by
+  `stage_ops`; the *current processing state* is derived from the states
+  and their current pointers (`dependencies.current_processing_state`) —
+  neither is computed from the recommended order or from each other.
+  Rules: [`docs/DEPENDENCY_MODEL.md`](docs/DEPENDENCY_MODEL.md);
+  state model and action log: [`CLAUDE.md`](CLAUDE.md).
 - **Shot domain first, CDP domain second.** `gathers` (CDP-indexed) and
   `shot_gathers` (shot-indexed) are both dicts of per-gather dicts. The
   base set owns the native arrays (`traces`, `offsets` …); each processing
@@ -580,19 +605,34 @@ Surface (Time) Map → Attribute Analysis**:
   dependency failing as ⛔; repeated operations and branching; stale
   reasons; inputs from different gathers; recommendations consistent with
   the recommended order.
+- `tests/test_action_log.py` — the history on its own, no data and no UI
+  (29 tests): the example order AGC → Band-pass → Mute → F-K → Band-pass kept
+  exactly, repeats as separate entries, order from the action number rather
+  than the clock (ties and a clock running backwards), newest-first as a copy
+  that leaves the log unchanged, filters, dataset sessions, frozen entries,
+  tamper detection (edit / remove / reorder / insert), text, CSV and JSON
+  forms keeping the order.
 - `tests/test_stage_ops.py` — the same behaviours through the real
-  processing maths, plus the state model (79 tests): non-standard orders,
+  processing maths, plus the state model and the history (104 tests): non-standard orders,
   skipped stages, `DependencyError` leaving no trace, repeat / branch /
   memoise, no input copies, release and re-compute bit-for-bit, the memory
   budget, undo/redo, discard, stale detection after real runs, replaying a
   recipe to the identical result, pre-stack migration with no stack,
-  exports, and executors refusing exactly what the UI marks ⛔.
-- `tests/test_app_nonlinear.py` — the app driven headlessly (23 tests): ⛔
+  exports, and executors refusing exactly what the UI marks ⛔. The history
+  tests run real operations in the brief's order and in other orders
+  (history == execution order, ≠ recommended order), repeated and identical
+  runs, blocked / invalid attempts, recorded warnings and QC, undo / redo /
+  discard / free-memory entries, system events kept out of the log, a new
+  survey starting a new dataset session, replay, and report / JSON / CSV.
+- `tests/test_app_nonlinear.py` — the app driven headlessly (31 tests): ⛔
   messages and absent controls, ⚠ *Continue?* / *Cancel*, non-standard
   orders, a skip-everything run to a final section, which state each run
   consumed and produced, identical re-runs reusing a state, choosing an
   earlier input, stale ⟳ notes, and undo / redo / discard / free memory
-  from the page.
+  from the page; and the History page — table in the order the buttons were
+  pressed, the display-order setting flipping the table (and the sidebar and
+  Home copies) without touching the log, current state vs history after an
+  undo, filters, the inspector, and the report following the log.
 
 Bugs found and fixed via this testing, beyond the NMO/picker/de-spike
 items documented above: `pick_velocity_field` crashed outright on a
@@ -610,6 +650,8 @@ python tests/manual_pipeline_check.py
 python tests/test_app_flow.py
 # state model and dependency rules:
 pytest tests/test_state_graph.py tests/test_dependencies.py tests/test_stage_ops.py tests/test_app_nonlinear.py -v
+# the processing history (immutable action log):
+pytest tests/test_action_log.py -v
 ```
 
 ---

@@ -217,13 +217,16 @@ def test_discard_removes_the_state_and_only_what_was_built_on_it():
     assert set(removed) == {vel.id, nmo.id} and vel.id not in g and cdp.id in g and "S3" in g
     assert removed[-1] == vel.id                         # dependents come first
     assert g.discard("S3") and len(g) == 3               # S0, S1, S2 remain
-    assert g.events[-1]["event"] == "discard"
+    assert len(g.actions) == 0                           # the graph never writes history; the executors do
 
 
-def test_reset_forgets_everything_and_restarts_at_s0():
+def test_reset_forgets_every_state_and_restarts_at_s0_but_keeps_the_history():
     g, *_ = multi_input()
+    g.actions.record("operation", "upload", label="Load Data", output="S0")
+    g.note_system("materialize", ["S3"], "re-computed S3")
     g.reset()
-    assert len(g) == 0 and g.peek_id() == "S0" and g.events == []
+    assert len(g) == 0 and g.peek_id() == "S0" and g.system_events == []
+    assert len(g.actions) == 1 and g.actions.session == 2            # earlier actions stay; a new session starts
 
 
 # ─────────────────────────────────────────────────────────────────────────

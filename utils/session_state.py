@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 
 from modules import stage_ops
+from modules.action_log import ORDERS, ActionLog
 from modules.dependencies import StageCheck, Workflow
 from modules.pipeline import PIPELINE_STAGES, PROCESSING_STORE_DEFAULTS, stage_label
 from modules.state_graph import DataState, ProcessingGraph
@@ -51,6 +52,7 @@ SESSION_DEFAULTS: Dict[str, Any] = {
     "fk_click_points": [],
     "_semblance_preview": None,
     "last_run": None,          # {"state", "op", "variant", "reused"} of the latest execution
+    "history_order": "oldest", # how the action log is DISPLAYED ("oldest" | "newest"); never how it is stored
     "_flash": None,            # one-shot message shown after a rerun
 }
 
@@ -67,6 +69,23 @@ def init_session_state() -> None:
 
 def graph() -> ProcessingGraph:
     return stage_ops.graph(st.session_state)
+
+
+def action_log() -> ActionLog:
+    """The processing history: every action in the exact order it was performed (immutable)."""
+    return stage_ops.action_log(st.session_state)
+
+
+def history_order() -> str:
+    """How the person wants the history displayed: 'oldest' (execution order) or 'newest' first."""
+    value = st.session_state.get("history_order", "oldest")
+    return value if value in ORDERS else "oldest"
+
+
+def set_history_order(order: str) -> None:
+    if order not in ORDERS:
+        raise ValueError(f"order must be one of {ORDERS}")
+    st.session_state["history_order"] = order
 
 
 def workflow() -> Workflow:
@@ -185,7 +204,8 @@ def progress_fraction() -> float:
     return len(st.session_state["completed_stages"]) / len(PIPELINE_STAGES)
 
 
-__all__ = ["SESSION_DEFAULTS", "init_session_state", "graph", "workflow", "check", "is_stage_done",
+__all__ = ["SESSION_DEFAULTS", "init_session_state", "graph", "action_log", "history_order",
+           "set_history_order", "workflow", "check", "is_stage_done",
            "latest", "current", "source", "result", "gathers", "section", "blob", "cdp_list",
            "best_available_state", "best_available_section", "select", "undo", "redo", "discard",
            "release", "set_pick", "require_stage", "progress_fraction"]

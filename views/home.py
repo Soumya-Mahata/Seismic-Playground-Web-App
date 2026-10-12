@@ -44,12 +44,17 @@ def render():
                     f"{len(st.session_state['attributes'])} attribute(s) computed")
 
     st.divider()
-    st.markdown("### Workflow status")
-    st.caption("The numbered order is the *recommended* order. Only a step's genuine inputs gate "
-                "it; optional steps can be skipped or reordered.")
+    st.markdown("### Current processing state")
+    st.caption("What the data is right now. (Not the history, and not the recommendation.)")
+    wf.current_state_panel()
+
+    st.markdown("### Recommended workflow")
+    st.caption("The usual order, for guidance only — it says nothing about what you did. Only a "
+                "step's genuine inputs gate it; optional steps can be skipped or reordered.")
     wf.home_status()
-    with st.expander("Processing history (in the order steps were run)"):
-        wf.history_table()
+
+    with st.expander("Processing history — what you actually did, in the order you did it"):
+        wf.history_table("history_home")
 
     st.divider()
     st.markdown("### Quick start")
@@ -72,7 +77,9 @@ def render():
         "pre-stack gathers + velocity (PSTM).\n"
         "6. **Interpretation & Attributes** — click to pick horizons/faults; compute "
         "industry-standard attributes (RMS, variance, sweetness, coherence, curvature, ...).\n"
-        "7. **Export** — download processed SEG-Y, picks, attributes, figures, and a report."
+        "7. **Export** — download processed SEG-Y, picks, attributes, figures, and a report.\n"
+        "8. **History** — every action you performed, exactly in the order you performed it "
+        "(repeats, failed attempts and undo/redo included), next to where the data is now."
     )
 
     with st.expander("Supported data formats"):

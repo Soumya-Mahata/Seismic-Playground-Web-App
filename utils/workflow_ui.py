@@ -14,22 +14,26 @@ state it will read + an input chooser) and runs it with `run_button()`, which
 only interposes a confirmation when there are ⚠ warnings — and never blocks on
 them. `execute()` runs it and reports which state it produced.
 
-The rest of this file shows the *data states*: the table of states, undo /
-redo, "make current", free memory, discard, and the execution-order history.
+The rest of this file shows the *data states* (the table of states, undo / redo,
+"make current", free memory, discard) and — kept strictly apart from them and from
+the recommended workflow — the **current processing state** and the **processing
+history**, which is the immutable chronological action log of what was done.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import pandas as pd
 import streamlit as st
 
 from modules import stage_ops
-from modules.dependencies import (Level, StageCheck, check_all, describe_lineage, describe_stream,
-                                  stale_info, stale_notes, state_name)
-from modules.pipeline import PIPELINE_STAGES, STAGE_GROUPS, STAGE_INDEX, STAGE_KIND, stage_label
+from modules.action_log import (FAILURE, ORDER_LABELS, ORDERS, Action, format_params, format_qc,
+                                one_line, report_lines, result_text)
+from modules.dependencies import (Level, StageCheck, check_all, current_processing_state,
+                                  describe_lineage, describe_stream, stale_info, stale_notes, state_name)
+from modules.pipeline import PIPELINE_STAGES, STAGE_GROUPS, STAGE_KIND, stage_label
 from modules.state_graph import DataState
 from modules.validation import ValidationError
 from utils import session_state as ss
@@ -445,22 +449,8 @@ def sidebar_status() -> None:
 
 
 def sidebar_current_data() -> None:
-    """What the data is right now: the lineage of the current shot-domain / CDP / section data."""
-    if st.session_state["survey"] is None:
-        return
-    for kind, icon, label in (("shot", "🔧", "Shot data"), ("cdp", "🔀", "CDP data"),
-                              ("section", "📚", "Section")):
-        head = ss.current(kind)
-        if head is not None:
-            st.caption(f"{icon} {label}: **{describe_stream(ss.workflow(), kind)}** ({head.id})")
-
-
-def sidebar_history() -> None:
-    """One line per data state, in the order they were produced."""
-    for s in ss.graph():
-        src = ", ".join(s.inputs.values())
-        st.caption(f"{s.id} · {stage_label(s.op)}" + (f" ({s.variant})" if s.variant else "")
-                   + (f"  ← {src}" if src else ""))
+    """Kept for callers of the old name; the sidebar shows the compact current state."""
+    current_state_panel(compact=True)
 
 
 def home_status() -> None:
@@ -483,27 +473,128 @@ def home_status() -> None:
     legend()
 
 
-def history_table() -> None:
-    """The processing history in *execution* order — which is not necessarily
-    the recommended order — with what each step consumed and produced."""
-    g = ss.graph()
-    if len(g) == 0:
-        st.caption("Nothing has been run yet.")
+# ---- the three things this app keeps apart ------------------------------------------------------------
+#
+#   CURRENT PROCESSING STATE   what the data is right now            (derived from the states)
+#   RECOMMENDED WORKFLOW       what is usually done, in what order   (status panels above)
+#   PROCESSING HISTORY         what was actually done, in what order (the immutable action log)
+#
+# The functions below draw the first and the third. Neither is computed from the other.
+
+_CURRENT_ICONS = {"shot": "🔧", "cdp": "🔀", "velocity": "🎯", "nmo": "📐", "dmo": "📐",
+                  "section": "📚", "image": "🗺️", "final": "🏁"}
+
+
+def current_state_panel(compact: bool = False) -> None:
+    """CURRENT PROCESSING STATE — one row per kind of data that exists: which state is current
+    and what has been applied to produce it. Not a history (that is the action log) and not a
+    recommendation (that is the workflow status)."""
+    if st.session_state["survey"] is None:
+        if not compact:
+            st.caption("No data loaded yet.")
         return
-    stale = stale_info(ss.workflow())
-    rows: List[Dict[str, object]] = []
-    prev_rec = -1
-    for s in g:
-        rec = STAGE_INDEX.get(s.op, 0)
-        out_of_order = rec < prev_rec
-        prev_rec = max(prev_rec, rec)
-        rows.append({
-            "state": s.id,
-            "step": stage_label(s.op) + (f" ({s.variant})" if s.variant else "")
-            + (f" v{s.version}" if s.version > 1 else ""),
-            "consumed": ", ".join(f"{role}={sid}" for role, sid in s.inputs.items()) or "—",
-            "parameters": params_summary(s.params),
-            "outside recommended order": "yes" if out_of_order else "",
-            "stale": "⟳" if s.id in stale else "",
-            "time": s.timestamp})
-    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    rows = current_processing_state(ss.workflow())
+    if not rows:
+        if not compact:
+            st.caption("No data states yet.")
+        return
+    if compact:
+        for r in rows:
+            flags = (" ⟳" if r["stale"] else "") + (" 💤" if r["released"] else "")
+            st.caption(f"{_CURRENT_ICONS.get(r['kind'], '•')} {r['data']}: **{r['applied']}** "
+                       f"({r['state']}){flags}")
+        return
+    st.dataframe(pd.DataFrame([{
+        "Data": r["data"], "Current state": r["name"], "What has been applied": r["applied"],
+        "States of this kind": r["n_states"],
+        "Status": "  ".join(f for f in (("⟳ " + r["stale"]) if r["stale"] else "",
+                                         "💤 arrays released" if r["released"] else "") if f) or "✓ up to date",
+    } for r in rows]), hide_index=True)
+
+
+def history_order_control(key: str) -> str:
+    """The explicit, user-selectable display order of the history ("oldest first" or "newest
+    first"). One shared setting (`ss.history_order()`), so every history on every page agrees;
+    it changes only how entries are *listed* — the log itself, and each entry's action number,
+    are never touched. Returns the order in force."""
+    st.session_state[key] = ss.history_order()          # one setting, however many widgets show it
+
+    def _changed(_key=key):
+        ss.set_history_order(st.session_state[_key])
+
+    st.radio("Show history", list(ORDERS), format_func=ORDER_LABELS.get, key=key, horizontal=True,
+             on_change=_changed,
+             help="Only the order the list is shown in. The action numbers (#1, #2 …) are the order "
+                  "the actions were performed and never change.")
+    return ss.history_order()
+
+
+HISTORY_FILTERS = ("All actions", "Operations only", "Failures & warnings")
+
+
+def _action_rows(entries: Sequence[Action], log, with_dataset: bool) -> List[dict]:
+    rows = []
+    for e in entries:
+        gone = log.discarded_by(e)
+        output = (e.output or "—") + (f"  (discarded by #{gone.n})" if gone else "")
+        problem = (f"✗ {e.error}" if e.status == FAILURE else "") or " | ".join(e.warnings)
+        row = {"#": e.n, "Time": e.timestamp, "Action": e.label,
+               "Parameters": format_params(e.params), "Input": e.input_state or "—", "Output": output,
+               "Result": result_text(e), "QC": format_qc(e.qc) or e.detail, "Warnings / reason": problem}
+        if with_dataset:
+            row = {"Dataset": e.session, **row}
+        rows.append(row)
+    return rows
+
+
+def history_table(key: str = "history", *, inspector: bool = True) -> None:
+    """PROCESSING HISTORY — every action in the order it was performed (the immutable action
+    log): number, time, operation, parameters, input and output state, result, QC and warnings.
+
+    Listed oldest- or newest-first according to the one shared display setting; the filter and
+    the dataset toggle only hide rows. Nothing here can change the log."""
+    log = ss.action_log()
+    if len(log) == 0:
+        st.caption("Nothing has been done yet. Every operation you run — successful or not — is "
+                   "recorded here in the order you ran it.")
+        return
+    order = history_order_control(f"{key}_order")
+    c1, c2 = st.columns([2, 3])
+    shown_filter = c1.radio("Filter", HISTORY_FILTERS, key=f"{key}_filter", horizontal=True)
+    session = log.session
+    if len(log.sessions()) > 1:
+        earlier = len(log) - len(log.view(session=log.session))
+        if c2.checkbox(f"Include earlier datasets ({earlier} action(s))", key=f"{key}_all_sessions"):
+            session = None
+    kinds = ("operation",) if shown_filter == "Operations only" else None
+    entries = log.view(order, kinds=kinds, session=session, issues_only=shown_filter == "Failures & warnings")
+    st.caption(f"{len(entries)} of {len(log.view(session=session))} action(s) shown · "
+               f"{'oldest → newest' if order == 'oldest' else 'newest → oldest'}.")
+    if not entries:
+        st.caption("No action matches this filter.")
+        return
+    st.dataframe(pd.DataFrame(_action_rows(entries, log, with_dataset=session is None)), hide_index=True)
+    if inspector:
+        numbers = [e.n for e in entries]
+        names = {e.n: one_line(e) for e in entries}
+        with st.expander("Inspect one action"):
+            pick = st.selectbox("Action", numbers, format_func=names.get, key=f"{key}_inspect")
+            st.code("\n".join(report_lines([log[pick]])), language=None)
+            st.json(log[pick].to_dict(), expanded=False)
+
+
+def sidebar_history(limit: int = 8) -> None:
+    """The most recent actions of the current dataset, one line each, listed in the chosen
+    display order. The full log is on the History page."""
+    log = ss.action_log()
+    entries = log.view("oldest", session=log.session)
+    if not entries:
+        st.caption("Nothing has been done yet.")
+        return
+    order = history_order_control("history_order_sidebar")
+    recent = entries[-limit:]
+    for e in (recent if order == "oldest" else recent[::-1]):
+        st.caption(one_line(e))
+    more = len(entries) - len(recent)
+    st.caption((f"Last {len(recent)} of {len(entries)} actions · " if more else "")
+               + "full log: 🕘 History page")

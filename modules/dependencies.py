@@ -780,6 +780,39 @@ def describe_stream(wf: Workflow, kind: str) -> str:
     return describe_lineage(wf, head.id, start_at=STREAM_BASE.get(kind))
 
 
+# What each kind of data is called in the "current processing state" summary.
+KIND_LABELS: Dict[str, str] = {
+    "shot": "Shot-domain data", "cdp": "CDP gathers", "velocity": "Velocity field",
+    "nmo": "NMO-corrected gathers", "dmo": "DMO output", "section": "Stacked / post-stack section",
+    "image": "Migrated image", "final": "Final section"}
+
+
+def current_processing_state(wf: Workflow) -> List[Dict[str, object]]:
+    """What the data IS right now — one row per kind of data that exists, naming the
+    state that is current and what has been applied to produce it.
+
+    This is deliberately not the history (what was done, in what order — that is the
+    action log) and not the recommended workflow (what is usually done). It is derived
+    from the states and their current pointers only.
+
+    Each row: kind, data (display name), state (id), name ("Band-pass (S3)"),
+    applied ("Raw → AGC → Band-pass"), n_states (how many states of this kind exist),
+    stale (why it is out of date, or ""), released (arrays are not in memory)."""
+    g = wf.graph
+    stale = stale_info(wf)
+    rows: List[Dict[str, object]] = []
+    for kind, label in KIND_LABELS.items():
+        cur = g.current(kind)
+        if cur is None:
+            continue
+        rows.append({
+            "kind": kind, "data": label, "state": cur.id, "name": state_name(cur),
+            "applied": describe_lineage(wf, cur.id), "n_states": len(g.of_kind(kind)),
+            "stale": stale[cur.id][0].detail if cur.id in stale else "",
+            "released": not cur.materialized})
+    return rows
+
+
 def advice_pairs() -> List[Tuple[str, str]]:
     """(earlier, later) pairs implied by every `Advice` — used by tests to
     assert the recommendations agree with the recommended order."""

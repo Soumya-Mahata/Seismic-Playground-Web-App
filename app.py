@@ -21,7 +21,7 @@ import config as cfg
 from modules.pipeline import PIPELINE_STAGES as _pipeline_stages
 from utils import session_state as ss
 from utils import workflow_ui as wf
-from views import (attributes_view, cdp_sort_view, data_management, export_view, home,
+from views import (attributes_view, cdp_sort_view, data_management, export_view, history_view, home,
                     interpretation_view, migration_view, poststack_view,
                     preprocessing_view, stacking_view, velocity_nmo_view)
 
@@ -55,6 +55,7 @@ PAGES = {
     "🧭 Interpretation": interpretation_view.render,
     "🧬 Attributes": attributes_view.render,
     "💾 Export": export_view.render,
+    "🕘 History": history_view.render,
 }
 
 with st.sidebar:
@@ -66,11 +67,14 @@ with st.sidebar:
                 text=f"{len(st.session_state['completed_stages'])} of {len(_pipeline_stages)} steps run")
     if st.session_state["survey"] is not None:
         st.caption(f"📂 {st.session_state['survey'].source_name}")
-    wf.sidebar_current_data()
-    with st.expander("Workflow status"):
+    # three separate things: where the data is now / what is recommended / what was done
+    if st.session_state["survey"] is not None and len(ss.graph()):
+        st.markdown("**Current processing state**")
+        wf.current_state_panel(compact=True)
+    with st.expander("Recommended workflow"):
         wf.sidebar_status()
-    if len(ss.graph()):
-        with st.expander("Data states (execution order)"):
+    if len(ss.action_log()):
+        with st.expander("Processing history (actions performed)"):
             wf.sidebar_history()
 
 wf.render_flash()

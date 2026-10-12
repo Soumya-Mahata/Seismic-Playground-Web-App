@@ -31,6 +31,7 @@ STACK = "📚 Stacking"
 POST = "🧹 Post-Stack Processing"
 MIG = "🗺️ Migration"
 EXPORT = "💾 Export"
+HISTORY = "🕘 History"
 
 
 def goto(at, page):
@@ -69,6 +70,19 @@ def graph(at):
 def history(at):
     """Operations in the order they were run (the order the states were created)."""
     return [s.op for s in graph(at)]
+
+
+def actions(at):
+    """The immutable action log behind the app (what the History page shows)."""
+    return graph(at).actions
+
+
+def history_frame(at):
+    """The History table as drawn on the page (a DataFrame), or None."""
+    for df in at.dataframe:
+        if {"#", "Action", "Parameters", "Result"} <= set(df.value.columns):
+            return df.value
+    return None
 
 
 def last_state(at):
@@ -430,3 +444,127 @@ def test_the_export_page_offers_the_state_history_and_a_recipe(at_shots):
     assert not at_shots.exception
     shown = texts(at_shots) + "\n".join(m.value for m in at_shots.markdown)
     assert "S" in shown and "Band-pass" in shown
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# History (what was done, in order) · current state (what is) · recommended workflow
+# ─────────────────────────────────────────────────────────────────────────
+
+def run_brief_order(at):
+    """AGC → Band-pass → Mute → Band-pass again, through the real buttons."""
+    goto(at, PRESTACK)
+    click(at, "run_agc"); click(at, "run_agc__continue")           # ⚠ band-pass not applied
+    click(at, "run_bp"); click(at, "run_bp__continue")             # ⚠ normally before AGC
+    click(at, "run_mute")
+    click(at, "run_bp"); click(at, "run_bp__continue")             # ⚠ repeated
+
+
+def test_the_history_page_lists_the_actions_in_the_order_they_were_run(at_shots):
+    run_brief_order(at_shots)
+    goto(at_shots, HISTORY)
+    df = history_frame(at_shots)
+    assert df is not None
+    assert list(df["#"]) == sorted(df["#"])                        # oldest first by default
+    ops_ = [a for a in df["Action"]]
+    assert len(ops_) == len(actions(at_shots))
+    performed = [e.action for e in actions(at_shots).entries()][2:]
+    assert performed == ["agc", "bandpass", "mute", "bandpass"]
+    assert [a.split(" (")[0] for a in ops_][-4:] == [a.split(" (")[0] for a in
+                                                      [e.label for e in actions(at_shots).entries()][-4:]]
+    # both band-passes are listed, each with its own input and output state
+    bp_rows = df[df["Action"].str.contains("Band")]
+    assert len(bp_rows) == 2 and bp_rows["Output"].nunique() == 2 and bp_rows["Input"].nunique() == 2
+    assert not at_shots.exception and not at_shots.warning
+
+
+def test_the_display_order_setting_flips_the_table_but_not_the_log(at_shots):
+    run_brief_order(at_shots)
+    goto(at_shots, HISTORY)
+    entries_before = actions(at_shots).entries()
+    oldest = list(history_frame(at_shots)["#"])
+    assert oldest == sorted(oldest) and at_shots.session_state["history_order"] == "oldest"
+
+    at_shots.radio(key="history_page_order").set_value("newest").run()
+    assert not at_shots.exception and not at_shots.warning
+    newest = list(history_frame(at_shots)["#"])
+    assert newest == oldest[::-1] and at_shots.session_state["history_order"] == "newest"
+    assert actions(at_shots).entries() == entries_before                  # the log is exactly as it was
+    assert [e.n for e in actions(at_shots)] == sorted(oldest)
+    assert at_shots.radio(key="history_order_sidebar").value == "newest"  # one setting, shown everywhere
+
+    at_shots.radio(key="history_page_order").set_value("oldest").run()
+    assert list(history_frame(at_shots)["#"]) == oldest
+    assert actions(at_shots).entries() == entries_before
+
+
+def test_the_sidebar_history_follows_the_same_setting(at_shots):
+    run_brief_order(at_shots)
+    at_shots.radio(key="history_order_sidebar").set_value("newest").run()
+    assert not at_shots.exception
+    lines = [c.value for c in at_shots.sidebar.caption if c.value.startswith("#")]
+    numbers = [int(l.split()[0][1:]) for l in lines]
+    assert numbers == sorted(numbers, reverse=True) and numbers[0] == len(actions(at_shots))
+    goto(at_shots, "🏠 Home")
+    assert at_shots.radio(key="history_home_order").value == "newest"
+
+
+def test_the_current_state_is_separate_from_the_history(at_shots):
+    run_brief_order(at_shots)
+    goto(at_shots, HISTORY)
+    now = [df.value for df in at_shots.dataframe if "What has been applied" in df.value.columns][0]
+    assert list(now["Data"]) == ["Shot-domain data"]
+    assert now["What has been applied"][0] == "Raw → AGC → Band-pass → Mute → Band-pass"
+    n = len(actions(at_shots))
+    goto(at_shots, PRESTACK)
+    [b for b in at_shots.button if (b.label or "").startswith("↶ Undo")][0].click().run()
+    assert not at_shots.exception
+    goto(at_shots, HISTORY)
+    now = [df.value for df in at_shots.dataframe if "What has been applied" in df.value.columns][0]
+    assert now["What has been applied"][0] == "Raw → AGC → Band-pass → Mute"      # where the data IS
+    df = history_frame(at_shots)
+    assert len(df) == n + 1 and df["Action"].iloc[-1].startswith("Undo")             # what happened, incl. the undo
+
+
+def test_the_filter_shows_failures_and_warnings_without_reordering(at_shots):
+    run_brief_order(at_shots)
+    goto(at_shots, HISTORY)
+    at_shots.radio(key="history_page_filter").set_value("Failures & warnings").run()
+    df = history_frame(at_shots)
+    assert not at_shots.exception and len(df) == 3                    # AGC, Band-pass, repeated Band-pass
+    assert list(df["#"]) == sorted(df["#"]) and all(df["Warnings / reason"])
+    at_shots.radio(key="history_page_filter").set_value("Operations only").run()
+    assert all(not a.startswith(("Undo", "Redo")) for a in history_frame(at_shots)["Action"])
+
+
+def test_the_inspector_shows_one_complete_record(at_shots):
+    run_brief_order(at_shots)
+    goto(at_shots, HISTORY)
+    at_shots.selectbox(key="history_page_inspect").set_value(3).run()
+    assert not at_shots.exception
+    shown = "\n".join(c.value for c in at_shots.code)
+    assert "#3" in shown and "input:" in shown and "parameters:" in shown and "QC:" in shown
+
+
+def test_each_page_names_what_it_shows(at_shots):
+    run_brief_order(at_shots)
+    goto(at_shots, "🏠 Home")
+    headings = "\n".join(m.value for m in at_shots.markdown)
+    assert "Current processing state" in headings and "Recommended workflow" in headings
+    assert any("what you actually did" in e.label for e in at_shots.expander)
+    side = "\n".join(m.value for m in at_shots.sidebar.markdown)
+    assert "Current processing state" in side
+    assert {e.label for e in at_shots.sidebar.expander} >= {"Recommended workflow",
+                                                           "Processing history (actions performed)"}
+
+
+def test_the_report_and_downloads_follow_the_action_log(at_shots):
+    run_brief_order(at_shots)
+    goto(at_shots, EXPORT)
+    assert not at_shots.exception
+    report = at_shots.text_area[0].value
+    assert report.index("CURRENT PROCESSING STATE") < report.index("ACTION LOG") < report.index("DATA STATES")
+    log_text = report[report.index("ACTION LOG"):report.index("DATA STATES")]
+    marks = [log_text.index(f"#{e.n} ") for e in actions(at_shots).entries()]
+    assert marks == sorted(marks) and log_text.count("Band-Pass Filter") == 2
+    at_shots.radio(key="history_order_sidebar").set_value("newest").run()
+    assert at_shots.text_area[0].value == report                       # the display setting never touches a file

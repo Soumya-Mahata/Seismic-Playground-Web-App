@@ -29,6 +29,11 @@ Where the arrays live
                         the payload of the current/latest state, refreshed by
                         `sync_aliases` (no copies). Read them; never write them.
 
+History: every execution — successful, re-used or failed — and every undo / redo /
+make-current / discard / free-memory the person performs is appended to the immutable
+action log (`graph.actions`, `modules/action_log.py`) in the order it happened. The log
+is the processing history; the states are the data. They are kept apart on purpose.
+
 Memory: `release_payload` drops a state's arrays (the record stays);
 `materialize` re-computes them from the recorded operation and parameters —
 which is also what makes a session reproducible (`replay_recipe`).
@@ -42,12 +47,14 @@ pipeline without a UI.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 
 import config as cfg
+from modules.action_log import FAILURE, ActionLog
 from modules import filtering, migration, nmo, preprocessing, regularization, segy_io, stacking
 from modules import statics as statics_mod
 from modules import velocity as vel_mod
@@ -84,6 +91,11 @@ def graph(store: MutableMapping) -> ProcessingGraph:
     if store.get("graph") is None:
         store["graph"] = ProcessingGraph()
     return store["graph"]
+
+
+def action_log(store: MutableMapping) -> ActionLog:
+    """The processing history: an append-only, chronological, immutable action log."""
+    return graph(store).actions
 
 
 def containers(store: MutableMapping) -> Dict[str, dict]:
@@ -262,6 +274,107 @@ def _op_key(stage_id: str, variant: Optional[str] = None) -> str:
     return f"{stage_id}:{variant}" if variant else stage_id
 
 
+# ---- the action log: what was executed, with what, and how it went --------------------------------
+
+def _op_label(stage_id: str, variant: Optional[str] = None) -> str:
+    return stage_label(stage_id) + (f" ({variant})" if variant else "")
+
+
+def _rms(arrays: Sequence[Any]) -> Tuple[Optional[float], int]:
+    """(RMS of the finite samples, number of non-finite samples) over some arrays."""
+    total, count, bad = 0.0, 0, 0
+    for a in arrays:
+        a = np.asarray(a)
+        if a.dtype.kind not in "fiu" or a.size == 0:
+            continue
+        if a.dtype.kind == "f":
+            finite = np.isfinite(a)
+            if not finite.all():
+                bad += int(a.size - np.count_nonzero(finite))
+                a = a[finite]
+        total += float(np.sum(np.square(a, dtype=np.float64)))
+        count += int(a.size)
+    return (math.sqrt(total / count) if count else None), bad
+
+
+def _main_arrays(store: MutableMapping, state: Optional[DataState]) -> List[np.ndarray]:
+    """The arrays that *are* a state's data: its traces (gather states), the survey's raw
+    traces (upload), its section (stacks, migrated images …)."""
+    if state is None or not state.materialized:
+        return []
+    if state.kind == "raw":
+        raw = getattr(store.get("survey"), "raw_data", None)
+        return [raw] if raw is not None else []
+    arrays: List[np.ndarray] = []
+    key = state.keys.get("traces")
+    container = containers(store).get(state.root) if state.root else None
+    if key and container:
+        arrays += [g[key] for g in container.values() if key in g]
+    section = blobs(store).get(state.id, {}).get("section")
+    if section is not None:
+        arrays.append(section)
+    return arrays
+
+
+def _sig(x: float) -> float:
+    return float(f"{x:.4g}")
+
+
+def qc_summary(store: MutableMapping, state: DataState) -> Dict[str, Any]:
+    """A short, cheap QC summary of the state an operation produced — the operation's own
+    diagnostics (`state.info`) plus amplitude statistics: RMS in → out, and a count of
+    non-finite samples. Read-only: it measures, it never changes a payload."""
+    qc: Dict[str, Any] = {}
+    for k, v in state.info.items():
+        jv = canonical(v) if isinstance(v, (bool, int, float, str, np.generic)) else None
+        if isinstance(jv, (bool, int, float, str)) and len(str(jv)) <= 60:
+            qc[k] = jv
+    rms_out, bad = _rms(_main_arrays(store, state))
+    if rms_out is not None:
+        qc["rms_out"], qc["non_finite"] = _sig(rms_out), bad
+        rms_in, _ = _rms(_main_arrays(store, graph(store).get(state.inputs.get("data"))))
+        if rms_in is not None:
+            qc["rms_in"] = _sig(rms_in)
+    field_ = blobs(store).get(state.id, {}).get("field")
+    if isinstance(field_, np.ndarray) and field_.size and np.isfinite(field_).all():
+        qc["v_min"], qc["v_max"] = _sig(float(field_.min())), _sig(float(field_.max()))
+    return qc
+
+
+def _log_success(store: MutableMapping, state: DataState, warnings: Sequence[Any], reused: bool) -> None:
+    src = graph(store).get(state.inputs.get("data"))
+    detail = (f"Identical to {state_name(state)} (same operation, parameters and input) — re-used; "
+              f"nothing was recomputed." if reused else
+              f"Produced {state_name(state)}" + (f" from {state_name(src)}." if src is not None else "."))
+    action_log(store).record(
+        "operation", state.op, label=_op_label(state.op, state.variant), variant=state.variant,
+        params=state.params, inputs=state.inputs, output=state.id, reused=reused,
+        qc=qc_summary(store, state), warnings=[w.message for w in warnings], detail=detail)
+
+
+def _log_failure(store: MutableMapping, stage_id: str, variant: Optional[str], params: Optional[dict],
+                 inputs: Optional[Dict[str, Optional[str]]], exc: BaseException,
+                 warnings: Sequence[Any] = ()) -> None:
+    """A refused or failed attempt is history too: it was something the person did."""
+    kind = ("blocked" if isinstance(exc, DependencyError) else
+            "invalid" if isinstance(exc, ValidationError) else "error")
+    message = str(exc) if kind != "error" else f"{type(exc).__name__}: {exc}"
+    action_log(store).record(
+        "operation", stage_id, label=_op_label(stage_id, variant), variant=variant or "",
+        params=params or {}, inputs={r: s for r, s in (inputs or {}).items() if s}, status=FAILURE,
+        failure_kind=kind, error=message, warnings=[w.message for w in warnings],
+        detail=f"Not run: {message.splitlines()[0][:200]}" if message else "Not run.")
+
+
+def _refuse(store: MutableMapping, stage_id: str, variant: Optional[str], params: Optional[dict],
+            message: str) -> None:
+    """Reject a call whose arguments are invalid before it reaches `execute` — and say so in the history."""
+    exc = ValidationError(message)
+    chk = check(store, stage_id, variant)
+    _log_failure(store, stage_id, variant, params, chk.inputs, exc, chk.warnings)
+    raise exc
+
+
 def _free_owned(store: MutableMapping, root: Optional[str], sid: str) -> None:
     """Drop every array state `sid` owns."""
     if root == sid:
@@ -294,13 +407,17 @@ def execute(store: MutableMapping, stage_id: str, params: Optional[dict] = None,
     g = graph(store)
     chk = check(store, stage_id, variant, inputs)
     if not chk.can_run:
-        raise DependencyError(f"Cannot run {stage_label(stage_id)}. {chk.blocker_text()}",
-                              stage_id=stage_id,
-                              missing=[s for i in chk.blockers for s in i.stages])
+        blocked = DependencyError(f"Cannot run {stage_label(stage_id)}. {chk.blocker_text()}",
+                                  stage_id=stage_id,
+                                  missing=[s for i in chk.blockers for s in i.stages])
+        _log_failure(store, stage_id, variant, params, chk.inputs, blocked, chk.warnings)
+        raise blocked
     try:
         cparams = canonical(params or {})
     except TypeError as exc:
-        raise ValidationError(str(exc)) from exc
+        invalid = ValidationError(str(exc))
+        _log_failure(store, stage_id, variant, params, chk.inputs, invalid, chk.warnings)
+        raise invalid from exc
     in_ids = {role: sid for role, sid in chk.inputs.items() if sid}
     if opdef.extras:
         in_ids.update(opdef.extras(store, chk, cparams))
@@ -313,6 +430,7 @@ def execute(store: MutableMapping, stage_id: str, params: Optional[dict] = None,
             sync_aliases(store)
             store["last_run"] = {"state": hit.id, "op": stage_id, "variant": variant or "",
                                  "reused": True}
+            _log_success(store, hit, chk.warnings, reused=True)
             return hit
 
     for src in in_ids.values():
@@ -322,8 +440,10 @@ def execute(store: MutableMapping, stage_id: str, params: Optional[dict] = None,
     run = Run(store, sid, stage_id, variant or "", in_ids, progress_cb)
     try:
         keys, info = opdef.compute(run, cparams)
-    except BaseException:
+    except BaseException as exc:
         _free_owned(store, sid if root == "self" else root, sid)
+        if isinstance(exc, Exception):
+            _log_failure(store, stage_id, variant, cparams, in_ids, exc, chk.warnings)
         raise
     if run.new_gathers is not None:
         containers(store)[sid] = run.new_gathers
@@ -335,6 +455,7 @@ def execute(store: MutableMapping, stage_id: str, params: Optional[dict] = None,
                   sid=sid)
     sync_aliases(store)
     store["last_run"] = {"state": state.id, "op": stage_id, "variant": variant or "", "reused": False}
+    _log_success(store, state, chk.warnings, reused=False)
     budget = float(getattr(cfg, "STATE_MEMORY_BUDGET_MB", 0) or 0)
     if budget > 0:
         enforce_budget(store, int(budget * 2 ** 20), protect=(state.id,))
@@ -390,10 +511,11 @@ def memory_report(store: MutableMapping) -> List[Dict[str, Any]]:
              "releasable": releasable(store, s.id)} for s in graph(store)]
 
 
-def release_payload(store: MutableMapping, sid: str) -> int:
+def release_payload(store: MutableMapping, sid: str, actor: str = "user") -> int:
     """Free a state's arrays but keep its record. Returns the bytes freed. The
     state is re-computed from its recorded operation and parameters when it
-    is next used (`materialize`)."""
+    is next used (`materialize`). A release the person asked for is history; one
+    the memory budget did on its own is only a system note."""
     g = graph(store)
     s = g[sid]
     if not releasable(store, sid):
@@ -402,7 +524,12 @@ def release_payload(store: MutableMapping, sid: str) -> int:
     freed = payload_bytes(store, sid)
     _free_owned(store, s.root, sid)
     s.materialized = False
-    g.log("release", [sid], f"released {sid} ({freed / 2 ** 20:.1f} MB)")
+    text = f"Freed {freed / 2 ** 20:.1f} MB held by {state_name(s)}; it is re-computed from its record when needed."
+    if actor == "user":
+        g.actions.record("release", "release", label="Free memory", inputs={"data": sid}, output=None,
+                         qc={"freed_mb": round(freed / 2 ** 20, 1)}, detail=text)
+    else:
+        g.note_system("release", [sid], text)
     sync_aliases(store)
     return freed
 
@@ -420,7 +547,7 @@ def enforce_budget(store: MutableMapping, budget_bytes: int, protect: Sequence[s
             break
         if s.id in keep or not releasable(store, s.id):
             continue
-        total -= release_payload(store, s.id)
+        total -= release_payload(store, s.id, actor="system")
         released.append(s.id)
     return released
 
@@ -444,7 +571,7 @@ def materialize(store: MutableMapping, sid: str, progress_cb: ProgressCb = None)
     if run.payload:
         blobs(store)[sid] = run.payload
     s.materialized = True
-    g.log("materialize", [sid], f"re-computed {sid} from its recorded operation")
+    g.note_system("materialize", [sid], f"re-computed {state_name(s)} from its recorded operation")
     sync_aliases(store)
     return s
 
@@ -453,11 +580,24 @@ def materialize(store: MutableMapping, sid: str, progress_cb: ProgressCb = None)
 # Moving around the graph
 # ─────────────────────────────────────────────────────────────────────────
 
+def _navigated(store: MutableMapping, kind_: str, label: str, before: Optional[DataState],
+              after: DataState, detail: str) -> None:
+    action_log(store).record(kind_, kind_, label=f"{label} ({after.kind} data)",
+                             inputs={"data": before.id} if before is not None else {},
+                             output=after.id, detail=detail)
+
+
 def select_state(store: MutableMapping, sid: str) -> DataState:
     """Make a state the current data of its kind (a deliberate choice)."""
+    g = graph(store)
+    before = g.current(g[sid].kind)
     materialize(store, sid)
-    s = graph(store).select(sid)
+    s = g.select(sid)
     sync_aliases(store)
+    _navigated(store, "select", "Make current", before, s,
+               f"Made {state_name(s)} the current {s.kind} data"
+               + (f" (it was {state_name(before)})." if before is not None and before.id != sid
+                  else " (it already was)."))
     return s
 
 
@@ -467,9 +607,12 @@ def undo(store: MutableMapping, kind: str) -> Optional[DataState]:
     target = g.undo_target(kind)
     if target is None:
         return None
+    before = g.current(kind)
     materialize(store, target.id)
     g.undo(kind)
     sync_aliases(store)
+    _navigated(store, "undo", "Undo", before, target,
+               f"Current {kind} data moved back from {state_name(before)} to {state_name(target)}.")
     return target
 
 
@@ -478,15 +621,19 @@ def redo(store: MutableMapping, kind: str) -> Optional[DataState]:
     target = g.redo_target(kind)
     if target is None:
         return None
+    before = g.current(kind)
     materialize(store, target.id)
     g.redo(kind)
     sync_aliases(store)
+    _navigated(store, "redo", "Redo", before, target,
+               f"Current {kind} data moved forward from {state_name(before)} to {state_name(target)}.")
     return target
 
 
 def discard_state(store: MutableMapping, sid: str) -> List[str]:
     """Delete a state AND every state built on it, freeing their arrays."""
     g = graph(store)
+    name = state_name(g[sid])
     doomed = [(d.id, d.root) for d in reversed(g.dependents(sid))] + [(sid, g[sid].root)]
     removed = g.discard(sid)
     for state_id, root in doomed:
@@ -498,12 +645,18 @@ def discard_state(store: MutableMapping, sid: str) -> List[str]:
     if (store.get("last_run") or {}).get("state") in gone:
         store["last_run"] = None
     sync_aliases(store)
+    others = [i for i in removed if i != sid]
+    g.actions.record(
+        "discard", "discard", label="Discard state", inputs={"data": sid}, output=None, affected=removed,
+        detail=f"Discarded {name}" + (f" and {len(others)} state(s) built on it ({', '.join(others)})."
+                                       if others else "."))
     return removed
 
 
 def reset_store(store: MutableMapping) -> None:
-    """Forget everything derived from the loaded survey."""
-    store["graph"] = ProcessingGraph()
+    """Forget every state derived from the loaded survey. The action log is kept: it moves
+    on to a new dataset session."""
+    graph(store).reset()
     store["containers"] = {}
     store["blobs"] = {}
     store["input_picks"] = {}
@@ -638,6 +791,7 @@ def replay_recipe(store: MutableMapping, sid: str, survey=None, progress_cb: Pro
 def run_load_survey(store: MutableMapping, survey, source_label: str) -> DataState:
     """Install a survey as the (only) loaded data. Everything derived from
     the previous survey is discarded; the new graph starts at S0."""
+    replacing = len(graph(store)) > 0
     reset_store(store)
     store["survey"] = survey
     state = graph(store).add(
@@ -648,6 +802,13 @@ def run_load_survey(store: MutableMapping, survey, source_label: str) -> DataSta
         keys={"traces": "raw_data"}, info={"synthetic": bool(getattr(survey, "is_synthetic", False))})
     sync_aliases(store)
     store["last_run"] = {"state": state.id, "op": "upload", "variant": "", "reused": False}
+    qc = qc_summary(store, state)
+    qc.update(traces=int(survey.num_traces), samples=int(survey.num_samples),
+              dt_ms=_sig(float(survey.sample_interval) * 1000.0))
+    action_log(store).record(
+        "operation", "upload", label=_op_label("upload"), params=state.params, output=state.id, qc=qc,
+        detail=f"Loaded {source_label}" + (" — replaced the previously loaded data; earlier actions stay "
+                                           "in the history under the previous dataset." if replacing else "."))
     return state
 
 
@@ -809,7 +970,8 @@ def run_mute(store: MutableMapping, kind: str = "flat", *, taper: float = cfg.MU
              x_min: float = 0.0, x_max: float = 0.0, t_min: float = 0.0, t_max: float = 0.0,
              inputs: Optional[Dict[str, str]] = None) -> DataState:
     if kind not in ("flat", "linear", "surgical"):
-        raise ValidationError(f"Unknown mute type '{kind}' (expected flat, linear or surgical).")
+        _refuse(store, "mute", None, {"kind": kind},
+                f"Unknown mute type '{kind}' (expected flat, linear or surgical).")
     if kind == "flat":
         params = dict(kind=kind, t_top=t_top, taper=taper)
     elif kind == "linear":
@@ -858,7 +1020,8 @@ def run_fk(store: MutableMapping, polygon, mode: str = cfg.FK_POLYGON_MODE_DEFAU
            coeff: float = cfg.FK_REJECT_COEFFICIENT_DEFAULT, source_desc: str = "custom polygon",
            progress_cb: ProgressCb = None, inputs: Optional[Dict[str, str]] = None) -> DataState:
     if polygon is None or len(polygon) < 3:
-        raise ValidationError("An F-K polygon needs at least 3 vertices.")
+        _refuse(store, "fk", None, {"polygon": polygon, "mode": mode, "coeff": coeff},
+                "An F-K polygon needs at least 3 vertices.")
     return execute(store, "fk", {"polygon": polygon, "mode": mode, "coeff": float(coeff)},
                    progress_cb=progress_cb, inputs=inputs, meta={"source": source_desc})
 

@@ -108,18 +108,22 @@ def render():
         }
         graph = ss.graph()
         only_this = section_state is not None and st.checkbox(
-            f"Only the states that produced the exported section ({section_state.id})", value=False)
+            f"Only what produced the exported section ({section_state.id}): its operations and states", value=False)
         report = io_export.processing_report_text(
             survey_info, graph, state_id=section_state.id if only_this else None)
         st.text_area("Report preview", report, height=400)
         base_name = survey.source_name.rsplit(".", 1)[0]
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         col1.download_button("⬇ Report (.txt)", report.encode("utf-8"),
                               file_name=f"{base_name}_processing_report.txt", mime="text/plain")
         col2.download_button("⬇ Data states (.json)", io_export.params_json_bytes(graph),
                               file_name=f"{base_name}_states.json", mime="application/json")
+        col3.download_button("⬇ History (.csv)", io_export.action_log_csv_bytes(graph.actions),
+                              file_name=f"{base_name}_history.csv", mime="text/csv",
+                              help="Every action in the order performed — chronological, regardless of "
+                                   "the display order chosen in the app.")
         if section_state is not None:
-            col3.download_button(f"⬇ Recipe for {section_state.id} (.json)",
+            col4.download_button(f"⬇ Recipe for {section_state.id} (.json)",
                                   io_export.recipe_json_bytes(graph, section_state.id),
                                   file_name=f"{base_name}_{section_state.id}_recipe.json",
                                   mime="application/json",
