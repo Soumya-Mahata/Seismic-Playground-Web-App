@@ -216,8 +216,10 @@ def render():
                      "independent of trace kill — run either, both, or neither.")
         wf.show_status("despike")
         c1, c2 = st.columns(2)
-        spike_window = c1.slider("De-spike window (samples)", 5, 60, 15, key="spike_window")
-        spike_thresh = c2.slider("De-spike threshold (x robust noise level)", 3.0, 15.0, 6.0, key="spike_thresh")
+        spike_window = c1.slider("De-spike window (samples)", 5, 60, cfg.DESPIKE_WINDOW_DEFAULT,
+                                 key="spike_window")
+        spike_thresh = c2.slider("De-spike threshold (x robust noise level)", 3.0, 15.0,
+                                 cfg.DESPIKE_THRESHOLD_DEFAULT, key="spike_thresh")
         if wf.run_button("despike", "Run de-spike", key="run_despike"):
             wf.execute(stage_ops.run_despike, spike_window, spike_thresh)
         e = wf.result("despike")
@@ -259,8 +261,10 @@ def render():
             st.caption(f"Detection will measure: **{state_name(det_state)}** data · "
                         f"the mask will be applied to: **{wf.input_name(chk)}** data.")
             c1, c2 = st.columns(2)
-            dead_frac = c1.slider("Dead-trace energy threshold (x median)", 0.001, 0.5, 0.02, key="dead_frac")
-            noisy_mult = c2.slider("Noisy-trace energy threshold (x median)", 2.0, 30.0, 8.0, key="noisy_mult")
+            dead_frac = c1.slider("Dead-trace energy threshold (x median)", 0.001, 0.5,
+                                  cfg.TRACE_KILL_DEAD_FRAC_DEFAULT, key="dead_frac")
+            noisy_mult = c2.slider("Noisy-trace energy threshold (x median)", 2.0, 30.0,
+                                   cfg.TRACE_KILL_NOISY_MULT_DEFAULT, key="noisy_mult")
             if wf.run_button("trace_edit", "Run trace kill", key="run_kill"):
                 wf.execute(stage_ops.run_trace_kill, dead_frac, noisy_mult)
             e = wf.result("trace_edit")
@@ -330,7 +334,8 @@ def render():
                 mute_kwargs = dict(kind="flat", t_top=t_top, taper=taper)
             elif mute_type.startswith("Top mute (follows"):
                 c1, c2 = st.columns(2)
-                v_mute = c1.slider("Mute velocity (m/s)", 200.0, 3000.0, 500.0, step=50.0, key="mute_velocity",
+                v_mute = c1.slider("Mute velocity (m/s)", 200.0, 3000.0, cfg.MUTE_LINEAR_VELOCITY_DEFAULT, step=50.0,
+                                 key="mute_velocity",
                                     help="Should roughly match the apparent velocity of the direct "
                                          "arrival / ground roll you want to remove — see its slope on "
                                          "the QC plot below.")
@@ -687,7 +692,7 @@ def render():
             st.caption(f"Suggested prediction lag for shot {shot_ms}, trace 0: "
                         f"≈{suggested_lag_s * 1000:.1f} ms ({int(round(suggested_lag_s / dt))} samples)")
             c1, c2, c3 = st.columns(3)
-            oplen = c1.slider("Operator length (samples)", 8, 150, 60, key="ms_oplen")
+            oplen = c1.slider("Operator length (samples)", 8, 150, cfg.MULT_SUPP_OPLEN_DEFAULT, key="ms_oplen")
             # The suggested lag is measured on whatever data this step will read, so the widget is
             # keyed by that source: if the shot-domain data changes (another step is applied, or
             # an earlier one re-run) the default is re-derived instead of staying at the value it

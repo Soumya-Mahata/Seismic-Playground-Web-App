@@ -75,7 +75,8 @@ def _migration_block(survey, cdp_list):
         )
         if chk.can_run:
             c1, c2 = st.columns(2)
-            stride = c1.slider("Output CDP stride (1 = every CDP, slow)", 1, 10, 3, key="pstm_stride")
+            stride = c1.slider("Output CDP stride (1 = every CDP, slow)", 1, 10, cfg.PSTM_CDP_STRIDE_DEFAULT,
+                               key="pstm_stride")
             c2.caption(f"Migrating from the {wf.input_name(chk)} gathers "
                         f"(offset-preserved), velocity: **{wf.input_name(chk, 'velocity')}** field. "
                         f"**Not** the NMO-corrected/stacked data, since PSTM needs the true offsets.")

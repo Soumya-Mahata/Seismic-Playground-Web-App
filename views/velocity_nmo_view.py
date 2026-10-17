@@ -319,7 +319,8 @@ def render():
                 "scan and any migration operator that sums over offset — but it is optional: those "
                 "steps can run without it."
             )
-            n_offsets = st.slider("Regularized offsets per CDP", 11, 61, 31, step=2, key="reg_noffsets")
+            n_offsets = st.slider("Regularized offsets per CDP", 11, 61, cfg.DATA_REG_N_OFFSETS_DEFAULT, step=2,
+                                  key="reg_noffsets")
             if wf.run_button("data_reg", "Run data regularisation", key="run_datareg"):
                 with st.spinner("Interpolating gathers onto a regular offset grid..."):
                     wf.execute(stage_ops.run_data_reg, n_offsets=int(n_offsets))

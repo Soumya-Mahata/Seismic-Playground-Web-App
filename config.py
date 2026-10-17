@@ -14,6 +14,9 @@ APP_VERSION = "1.0.0"
 # ── Minimum traces to keep a CDP gather (drops near-edge, low-fold CDPs) ────
 N_MIN_TRACES_DEFAULT = 10
 
+# ── Shot gathers ─────────────────────────────────────────────────────────
+SHOT_GATHER_MIN_TRACES_DEFAULT = 1  # keep every shot (the CDP sort has its own minimum-fold setting)
+
 # ── 4) Amplitude recovery (AGC) ──────────────────────────────────────────
 AGC_WINDOW_DEFAULT = 250          # samples
 AGC_MODE_DEFAULT = "rms"          # rms | mean | median
@@ -21,6 +24,16 @@ AGC_MODE_DEFAULT = "rms"          # rms | mean | median
 # ── 5) Deconvolution before stack (spiking / Wiener-Hopf) ───────────────
 DECON_OPLEN_DEFAULT = 30          # samples
 DECON_PW_DEFAULT = 0.01           # pre-whitening fraction (1%)
+
+# Multiple suppression (predictive / gap deconvolution, shot domain)
+MULT_SUPP_OPLEN_DEFAULT = 60      # samples
+MULT_SUPP_LAG_DEFAULT = 30        # samples (prediction lag)
+
+# ── De-spike and trace edit / kill (shot domain) ─────────────────────────
+DESPIKE_WINDOW_DEFAULT = 15       # samples (sliding-median window)
+DESPIKE_THRESHOLD_DEFAULT = 6.0   # x the local robust noise level
+TRACE_KILL_DEAD_FRAC_DEFAULT = 0.02   # dead trace: energy below this fraction of the median
+TRACE_KILL_NOISY_MULT_DEFAULT = 8.0   # noisy trace: energy above this multiple of the median
 
 # ── 6) Band-pass filter ──────────────────────────────────────────────────
 FMIN_DEFAULT = 12.0                # Hz
@@ -35,6 +48,7 @@ NORM_WINDOW_S_DEFAULT = 1.5        # seconds, from t=0
 # ── 8) Top mute ───────────────────────────────────────────────────────────
 MUTE_TTOP_DEFAULT = 0.05           # seconds
 MUTE_TAPER_DEFAULT = 0.05          # seconds
+MUTE_LINEAR_VELOCITY_DEFAULT = 500.0   # m/s, offset-dependent (linear-moveout) mute
 
 # ── 9) F-K dip filter ─────────────────────────────────────────────────────
 # Ground roll/direct-wave/refraction noise has a characteristic LOW
@@ -85,6 +99,9 @@ RELIABILITY_THRESHOLD_DEFAULT = 0.15      # max tolerated relative deviation fro
 # ── 11/16) NMO ────────────────────────────────────────────────────────────
 NMO_STRETCH_MUTE_DEFAULT = 0.30    # fractional stretch cutoff
 
+# ── Data regularisation ──────────────────────────────────────────────────
+DATA_REG_N_OFFSETS_DEFAULT = 31    # regularised offsets per CDP gather
+
 # ── 12) Residual statics ─────────────────────────────────────────────────
 MAX_STATIC_SHIFT_S_DEFAULT = 0.02  # s, +/- search window
 
@@ -105,6 +122,7 @@ TVF_TAPER_S_DEFAULT = 0.15
 
 # ── 21) Kirchhoff migration ───────────────────────────────────────────────
 APERTURE_M_DEFAULT = 900.0         # m, half-aperture
+PSTM_CDP_STRIDE_DEFAULT = 3        # pre-stack migration: migrate every n-th output CDP (1 = all, slow)
 
 # ── 22) Final scaling ─────────────────────────────────────────────────────
 FINAL_AGC_WINDOW_DEFAULT = 300     # samples

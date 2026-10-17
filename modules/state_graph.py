@@ -47,12 +47,13 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Set, 
 
 from modules.action_log import ActionLog
 from modules.canonical import array_digest, canonical, jsonable
+from modules.registry import KINDS as _REGISTRY_KINDS
 
 __all__ = ["KINDS", "GraphError", "DataState", "ProcessingGraph", "make_fingerprint",
            "array_digest", "canonical", "jsonable"]      # the last three live in modules/canonical.py
 
-# Kinds of data a state can hold (what a downstream step can ask for).
-KINDS: Tuple[str, ...] = ("raw", "shot", "cdp", "velocity", "nmo", "dmo", "section", "image", "final")
+# Kinds of data a state can hold (what a downstream step can ask for) — declared in the registry.
+KINDS: Tuple[str, ...] = _REGISTRY_KINDS
 
 
 class GraphError(KeyError):

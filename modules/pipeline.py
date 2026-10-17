@@ -1,23 +1,28 @@
 """
-modules/pipeline.py — Stage Registry (recommended order) & what each stage produces
-======================================================================================
-The *descriptive* half of the workflow model. Four things that used to be
-fused into "the pipeline" are kept apart, and this file owns the first:
+modules/pipeline.py — the recommended order, and the data-store layout
+======================================================================
+Operation metadata is declared ONCE, in `modules/registry.py`. This file is
+the *view* of it that the rest of the application has always imported
+(`PIPELINE_STAGES`, `STAGE_KIND`, `ROOT_STAGES`, `STAGE_GROUPS` …): nothing
+here is declared a second time, it is all derived.
 
-  1. RECOMMENDED PROCESSING ORDER   -> `PIPELINE_STAGES` (this file).
-     The conventional sequence, used for the sidebar/home layout and as
-     documentation. It is advice, never an execution constraint.
-  2. GENUINE COMPUTATIONAL DEPENDENCIES -> `modules/dependencies.py`.
+Four things that used to be fused into "the pipeline" are kept apart:
+
+  1. RECOMMENDED PROCESSING ORDER   -> `PIPELINE_STAGES` (this file, from the
+     registry's declaration order). The conventional sequence, used for the
+     sidebar/home layout and as documentation. Advice, never an execution
+     constraint.
+  2. GENUINE COMPUTATIONAL DEPENDENCIES -> declared in the registry
+     (`Operation.needs`), evaluated by `modules/dependencies.py`.
      What a stage actually needs to exist before it can run.
   3. DATA STATES                    -> `modules/state_graph.py`.
      What data actually exists: every operation consumes states and
      produces a new one (INPUT STATE -> OPERATION + PARAMETERS -> OUTPUT
      STATE), recorded with a stable id and lineage fingerprint.
-  4. PROCESSING HISTORY             -> the states, in creation order.
+  4. PROCESSING HISTORY             -> `modules/action_log.py`, the immutable
+     chronological log of what the person did.
 
-Also here: the *kind* of data each stage produces (`STAGE_KIND`), which is
-how a stage asks for "the current shot-domain data" without naming the
-stage that happened to make it, and the data-store defaults.
+Also here: the data-store defaults (the schema of the store `stage_ops` works on).
 
 No Streamlit dependency — pure data + small helpers.
 """
@@ -29,10 +34,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 import config as cfg
+from modules import registry
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 1) RECOMMENDED ORDER
+# 1) RECOMMENDED ORDER  (derived from the registry)
 # ─────────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -47,70 +53,16 @@ class Stage:
 
 # NOTE: this list is the RECOMMENDED order. Nothing in the app requires a
 # stage to run just because the stages before it in this list have run.
-# Which stages genuinely need which others is declared in
-# `modules/dependencies.STAGE_SPECS`.
+# Which stages genuinely need which others is declared in the registry.
 PIPELINE_STAGES: List[Stage] = [
-    Stage("upload", "Load Data", "Read a SEG-Y survey (or generate synthetic test data).", "1", "data"),
-    Stage("shot_gathers", "Build Shot Gathers", "Group traces by shot (FieldRecord) — the starting "
-          "point for shot-domain pre-stack conditioning.", "1", "data", optional=True),
-    Stage("bandpass", "Band-Pass Filter", "Trapezoidal frequency-domain band-pass (shot domain).",
-          "2", "prestack", optional=True),
-    Stage("agc", "Amplitude Recovery (AGC)", "Sliding-window automatic gain control (shot domain).",
-          "3", "prestack", optional=True),
-    Stage("despike", "De-spike", "Remove burst-noise spikes sample-by-sample (shot domain).",
-          "4a", "prestack", optional=True),
-    Stage("trace_edit", "Trace Edit / Kill", "Zero dead/abnormally noisy traces (shot domain).",
-          "4b", "prestack", optional=True),
-    Stage("mute", "Mute", "Top mute (flat or offset-dependent) and surgical mute (shot domain).",
-          "5", "prestack", optional=True),
-    Stage("balance", "Trace Balancing", "Scalar RMS normalization per trace (shot domain).",
-          "6", "prestack", optional=True),
-    Stage("fk", "F-K Dip Filter", "2-D FFT polygon mask — ground-roll attenuation (shot domain).",
-          "7", "prestack", optional=True),
-    Stage("mult_supp", "Multiple Suppression", "Predictive (gap) deconvolution — attenuates short-period "
-          "reverberations/multiples.", "8", "prestack", optional=True),
-    Stage("decon", "Deconvolution", "Spiking deconvolution per trace (shot domain).",
-          "9", "prestack", optional=True),
-    Stage("cdp_sort", "CDP Sort / Binning", "Re-group the traces (conditioned, if any conditioning "
-          "was applied) by CDP ensemble number.", "10", "velocity"),
-    Stage("vel1", "Velocity Analysis — Pass 1", "Semblance velocity analysis (approximate); auto-pick, "
-          "manual click-pick, or Constant-Velocity Stack.", "11", "velocity"),
-    Stage("nmo1", "NMO Correction — Pass 1", "Apply pass-1 stacking velocities to the CDP-sorted gathers.",
-          "12", "velocity"),
-    Stage("statics", "Residual Statics", "Surface-consistent shot/receiver statics.",
-          "13", "velocity", optional=True),
-    Stage("dmo", "DMO Correction", "Simplified dip-moveout time-stretch.", "14", "velocity", optional=True),
-    Stage("inv_nmo", "Inverse NMO", "Undo pass-1 NMO on the DMO-corrected data.", "15", "velocity",
-          optional=True),
-    Stage("data_reg", "Data Regularisation", "Interpolate each CDP gather onto a common, regularly "
-          "spaced offset grid — recommended before velocity analysis, stacking, and migration.",
-          "15b", "velocity", optional=True),
-    Stage("vel2", "RMS Velocity Analysis (Pass 2)", "Refined semblance velocity analysis on the "
-          "refined (statics/DMO/regularised) gathers.", "16", "velocity", optional=True),
-    Stage("nmo_final", "Final NMO", "Apply the best available stacking velocities (pass 2, else pass 1) "
-          "to the current pre-NMO gathers.", "17", "velocity"),
-    Stage("stack", "Stack", "Fold-normalized CDP stack of NMO-corrected gathers.", "18", "stack"),
-    Stage("rna", "Random Noise Attenuation", "Spatial median filter across CDPs.", "19", "stack",
-          optional=True),
-    Stage("decon_post", "Deconvolution (post-stack)", "A milder second spiking-deconvolution pass.",
-          "20", "stack", optional=True),
-    Stage("tvf", "Time-Variant Filter", "Depth-zoned band-pass blending.", "21", "stack", optional=True),
-    Stage("migration", "Migration", "Post-stack Kirchhoff time migration, or pre-stack Kirchhoff "
-          "time migration (PSTM) on CDP gathers before stack.", "22", "stack", optional=True),
-    Stage("final_scale", "Final Scaling", "Display AGC + re-applied top mute.", "23", "stack",
-          optional=True),
-]
+    Stage(o.id, o.display_name, registry.stage_description(o.id), o.step_number, o.group, o.optional)
+    for o in registry.stages()]
 
-STAGE_INDEX = {s.id: i for i, s in enumerate(PIPELINE_STAGES)}
+STAGE_INDEX = dict(registry.STAGE_INDEX)
 STAGE_BY_ID = {s.id: s for s in PIPELINE_STAGES}
 
 # Display grouping (home page): (heading, group id)
-STAGE_GROUPS: List[Tuple[str, str]] = [
-    ("📂 Data & Shot Gathers", "data"),
-    ("⚙️ Pre-Stack Conditioning", "prestack"),
-    ("🔀 CDP Sort → 🎯 Velocity/NMO/DMO", "velocity"),
-    ("📚 Stack → 🗺️ Migration", "stack"),
-]
+STAGE_GROUPS: List[Tuple[str, str]] = [(heading, gid) for gid, heading in registry.GROUPS]
 
 
 def stages_from(stage_id: str) -> List[str]:
@@ -123,36 +75,21 @@ def stages_from(stage_id: str) -> List[str]:
     return [s.id for s in PIPELINE_STAGES[i:]]
 
 
-def stage_label(stage_id: str) -> str:
-    s = STAGE_BY_ID.get(stage_id)
-    return s.label if s else stage_id
+stage_label = registry.stage_label
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 2) WHAT EACH STAGE PRODUCES
+# 2) WHAT EACH STAGE PRODUCES  (derived from the registry)
 # ─────────────────────────────────────────────────────────────────────────
 # The KIND of data state a stage's output is (see `state_graph.KINDS`). A
 # stage that wants "the shot-domain data as it is now" asks for '@shot'
 # and gets whichever state of that kind is current — it never names the
 # stage that produced it, which is what lets operations run in any order.
-STAGE_KIND: Dict[str, str] = {
-    "upload": "raw",
-    "shot_gathers": "shot",
-    "bandpass": "shot", "agc": "shot", "despike": "shot", "trace_edit": "shot", "mute": "shot",
-    "balance": "shot", "fk": "shot", "mult_supp": "shot", "decon": "shot",
-    "cdp_sort": "cdp",
-    "vel1": "velocity", "vel2": "velocity",
-    "nmo1": "nmo", "nmo_final": "nmo",
-    "statics": "cdp", "inv_nmo": "cdp", "data_reg": "cdp",
-    "dmo": "dmo",
-    "stack": "section", "rna": "section", "decon_post": "section", "tvf": "section",
-    "migration": "image",
-    "final_scale": "final",
-}
+STAGE_KIND: Dict[str, str] = dict(registry.STAGE_KIND)
 
 # Stages that start a new set of gathers (their output owns a gather
 # container; states derived from it share that container).
-ROOT_STAGES: Tuple[str, ...] = ("shot_gathers", "cdp_sort")
+ROOT_STAGES: Tuple[str, ...] = registry.ROOT_STAGES
 
 
 # ─────────────────────────────────────────────────────────────────────────

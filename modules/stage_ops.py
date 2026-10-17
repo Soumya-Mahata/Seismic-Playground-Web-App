@@ -6,12 +6,20 @@ Every processing operation is one call of the same generic `execute()`:
     INPUT STATE(S) ──▶ OPERATION + PARAMETERS ──▶ OUTPUT STATE
          S2              Band-pass(8–60 Hz)            S3
 
+What an operation *is* — its name, inputs, recommendations, parameter schema and
+validator — is declared once in `modules/registry.py`. This file supplies the other half: the
+function that calls the unchanged maths (`@_op("agc")` binds it to the registry's declaration),
+an optional extra QC builder (`@_qc`), and a `run_<op>` wrapper per operation that builds the
+complete parameter dict from the defaults in `config.py`.
+
 `execute` (1) asks the dependency engine which input states the operation
 would read and whether it may run (⛔ raises `DependencyError`; ⚠ never
-raises), (2) fingerprints the operation + parameters + inputs and *re-uses*
-an existing state if the identical computation was already done, (3) runs the
-unchanged processing maths on the input payloads, and (4) records the result
-as a NEW state in the graph. Nothing is ever overwritten, so operations can be
+raises), (2) validates the parameters against the registry (schema + the
+operation's own validator; a rejection is a recorded `invalid` attempt, raised
+before any maths), (3) fingerprints the operation + parameters + inputs and
+*re-uses* an existing state if the identical computation was already done,
+(4) runs the unchanged processing maths on the input payloads, and (5) records
+the result as a NEW state in the graph. Nothing is ever overwritten, so operations can be
 repeated, applied in any order, applied to an earlier state, undone and redone.
 
 Where the arrays live
@@ -55,22 +63,20 @@ import numpy as np
 
 import config as cfg
 from modules.action_log import FAILURE, ActionLog
-from modules import filtering, migration, nmo, preprocessing, regularization, segy_io, stacking
+from modules import filtering, migration, nmo, preprocessing, regularization, registry, segy_io, stacking
 from modules import statics as statics_mod
 from modules import velocity as vel_mod
 from modules.dependencies import StageCheck, Workflow, check_stage, get_spec, state_name
-from modules.pipeline import (ALIAS_KEYS, PROCESSING_STORE_DEFAULTS, ROOT_STAGES, STAGE_KIND,
-                              stage_label)
+from modules.pipeline import ALIAS_KEYS, PROCESSING_STORE_DEFAULTS, stage_label
 from modules.state_graph import (DataState, GraphError, ProcessingGraph, array_digest, canonical)
 from modules.validation import (DependencyError, ValidationError, require_gather_key,
-                                validate_cdp_gathers, validate_frequency_band,
-                                validate_velocity_field)
+                                validate_cdp_gathers, validate_velocity_field)
 
 ProgressCb = Optional[Callable[[float], None]]
 
 # Operations that change each trace's gain: amplitude-based trace detection must
-# look at data from *before* the first of them.
-GAIN_ALTERING_STAGES: Tuple[str, ...] = ("agc", "balance")
+# look at data from *before* the first of them (declared in the registry: `alters_amplitudes`).
+GAIN_ALTERING_STAGES: Tuple[str, ...] = registry.GAIN_ALTERING_STAGES
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -254,18 +260,21 @@ class Run:
 Computed = Tuple[Dict[str, str], Dict[str, Any]]          # (state.keys, state.info)
 
 
-@dataclass(frozen=True)
-class OpDef:
-    compute: Callable[[Run, dict], Computed]
-    extras: Optional[Callable[[MutableMapping, StageCheck, dict], Dict[str, str]]] = None
-
-
-OPS: Dict[str, OpDef] = {}
-
-
 def _op(key: str, extras: Optional[Callable] = None):
+    """Bind a compute function (and, optionally, its extra-input function) to the operation
+    the registry declares under `key`. The metadata — name, needs, parameters, validation —
+    lives in `modules/registry.py`; only the maths-calling function lives here."""
     def deco(fn):
-        OPS[key] = OpDef(fn, extras)
+        registry.bind(key, compute=fn, extras=extras)
+        return fn
+    return deco
+
+
+def _qc(*keys: str):
+    """Bind an extra QC builder `(store, state) -> dict` to operations (on top of the generic summary)."""
+    def deco(fn):
+        for key in keys:
+            registry.bind(key, qc=fn)
         return fn
     return deco
 
@@ -335,10 +344,19 @@ def qc_summary(store: MutableMapping, state: DataState) -> Dict[str, Any]:
         rms_in, _ = _rms(_main_arrays(store, graph(store).get(state.inputs.get("data"))))
         if rms_in is not None:
             qc["rms_in"] = _sig(rms_in)
+    op = registry.find(state.op_key())
+    if op is not None and op.qc is not None:           # the operation's own extra QC (registry)
+        qc.update(op.qc(store, state))
+    return qc
+
+
+@_qc("vel1", "vel2")
+def _qc_velocity(store: MutableMapping, state: DataState) -> Dict[str, Any]:
+    """The range of the velocity field a velocity analysis produced."""
     field_ = blobs(store).get(state.id, {}).get("field")
     if isinstance(field_, np.ndarray) and field_.size and np.isfinite(field_).all():
-        qc["v_min"], qc["v_max"] = _sig(float(field_.min())), _sig(float(field_.max()))
-    return qc
+        return {"v_min": _sig(float(field_.min())), "v_max": _sig(float(field_.max()))}
+    return {}
 
 
 def _log_success(store: MutableMapping, state: DataState, warnings: Sequence[Any], reused: bool) -> None:
@@ -375,6 +393,16 @@ def _refuse(store: MutableMapping, stage_id: str, variant: Optional[str], params
     raise exc
 
 
+def _precheck(store: MutableMapping, stage_id: str, variant: Optional[str], params: dict) -> None:
+    """Vet the arguments of a `run_*` call against the registry's schema and validator *before* a
+    complete parameter set exists (an unknown mute type has no parameter set to build). A rejection
+    is recorded in the history, then raised — the same thing `execute` does for a complete set."""
+    try:
+        registry.get(stage_id, variant).validate_params(params, store.get("survey"), complete=False)
+    except ValidationError as exc:
+        _refuse(store, stage_id, variant, params, str(exc))
+
+
 def _free_owned(store: MutableMapping, root: Optional[str], sid: str) -> None:
     """Drop every array state `sid` owns."""
     if root == sid:
@@ -401,8 +429,8 @@ def execute(store: MutableMapping, stage_id: str, params: Optional[dict] = None,
     with the same lineage fingerprint already exists it is re-used (made
     current) instead of being computed and stored again. `meta` is extra
     diagnostic info to record (not part of the state's identity)."""
-    opdef = OPS.get(_op_key(stage_id, variant))
-    if opdef is None:
+    op = registry.find(_op_key(stage_id, variant))
+    if op is None or op.compute is None:
         raise KeyError(f"No executor for stage '{_op_key(stage_id, variant)}'")
     g = graph(store)
     chk = check(store, stage_id, variant, inputs)
@@ -419,8 +447,13 @@ def execute(store: MutableMapping, stage_id: str, params: Optional[dict] = None,
         _log_failure(store, stage_id, variant, params, chk.inputs, invalid, chk.warnings)
         raise invalid from exc
     in_ids = {role: sid for role, sid in chk.inputs.items() if sid}
-    if opdef.extras:
-        in_ids.update(opdef.extras(store, chk, cparams))
+    if op.extras:
+        in_ids.update(op.extras(store, chk, cparams))
+    try:                                   # the registry's schema + the operation's own validator
+        op.validate_params(cparams, store.get("survey"))
+    except ValidationError as invalid:
+        _log_failure(store, stage_id, variant, cparams, in_ids, invalid, chk.warnings)
+        raise
 
     if reuse:
         hit = g.find(g.fingerprint_for(stage_id, variant or "", cparams, in_ids))
@@ -436,10 +469,10 @@ def execute(store: MutableMapping, stage_id: str, params: Optional[dict] = None,
     for src in in_ids.values():
         materialize(store, src, progress_cb=None)
     sid = g.peek_id()
-    root = "self" if stage_id in ROOT_STAGES else (g[in_ids["data"]].root if "data" in in_ids else None)
+    root = "self" if op.is_root else (g[in_ids["data"]].root if "data" in in_ids else None)
     run = Run(store, sid, stage_id, variant or "", in_ids, progress_cb)
     try:
-        keys, info = opdef.compute(run, cparams)
+        keys, info = op.compute(run, cparams)
     except BaseException as exc:
         _free_owned(store, sid if root == "self" else root, sid)
         if isinstance(exc, Exception):
@@ -450,7 +483,7 @@ def execute(store: MutableMapping, stage_id: str, params: Optional[dict] = None,
     if run.payload:
         blobs(store)[sid] = run.payload
     notes = ("Run despite: " + " | ".join(w.message for w in chk.warnings)) if chk.warnings else ""
-    state = g.add(kind=STAGE_KIND[stage_id], op=stage_id, variant=variant or "", params=cparams,
+    state = g.add(kind=op.output_type, op=stage_id, variant=variant or "", params=cparams,
                   inputs=in_ids, root=root, keys=keys, info={**info, **(meta or {})}, notes=notes,
                   sid=sid)
     sync_aliases(store)
@@ -538,8 +571,7 @@ def enforce_budget(store: MutableMapping, budget_bytes: int, protect: Sequence[s
     """Release the least recently used states until the payloads fit the budget.
     The current state of every kind, and `protect`, are never released."""
     g = graph(store)
-    keep = set(protect) | {c.id for k in ("shot", "cdp", "velocity", "nmo", "dmo", "section", "image",
-                                          "final") if (c := g.current(k)) is not None}
+    keep = set(protect) | {c.id for k in registry.processed_kinds() if (c := g.current(k)) is not None}
     released: List[str] = []
     total = sum(payload_bytes(store, s.id) for s in g)
     for s in sorted(g, key=lambda x: x.touch):
@@ -561,10 +593,10 @@ def materialize(store: MutableMapping, sid: str, progress_cb: ProgressCb = None)
         return s
     for src in s.inputs.values():
         materialize(store, src)
-    opdef = OPS[_op_key(s.op, s.variant)]
+    op = registry.get(s.op, s.variant or None)
     run = Run(store, sid, s.op, s.variant, dict(s.inputs), progress_cb)
     try:
-        opdef.compute(run, copy.deepcopy(s.params))
+        op.compute(run, copy.deepcopy(s.params))
     except BaseException:
         _free_owned(store, s.root, sid)
         raise
@@ -819,7 +851,8 @@ def _c_shot_gathers(run: Run, p: dict) -> Computed:
     return {"traces": "traces", "offsets": "offsets"}, {"n_shots": len(gathers)}
 
 
-def run_build_shot_gathers(store: MutableMapping, n_min_traces: int = 1) -> DataState:
+def run_build_shot_gathers(store: MutableMapping,
+                           n_min_traces: int = cfg.SHOT_GATHER_MIN_TRACES_DEFAULT) -> DataState:
     return execute(store, "shot_gathers", {"n_min_traces": int(n_min_traces)})
 
 
@@ -838,8 +871,7 @@ def _shot_out(run: Run, ok: str, **extra: str) -> Dict[str, str]:
 @_op("bandpass")
 def _c_bandpass(run: Run, p: dict) -> Computed:
     survey = run.survey
-    gathers, ik, ok = _shot_io(run)
-    validate_frequency_band(p["fmin"], p["fmax"], 0.5 / survey.sample_interval)
+    gathers, ik, ok = _shot_io(run)        # the band is validated by the registry before this runs
     h = filtering.design_bandpass(p["fmin"], p["fmax"], survey.sample_interval, survey.num_samples,
                                   p["low_slope"], p["high_slope"])
     out = run.key("traces")
@@ -881,7 +913,8 @@ def _c_despike(run: Run, p: dict) -> Computed:
     return _shot_out(run, ok, spike_mask=mask_key), {"samples_flagged": total}
 
 
-def run_despike(store: MutableMapping, window: int = 15, threshold: float = 6.0,
+def run_despike(store: MutableMapping, window: int = cfg.DESPIKE_WINDOW_DEFAULT,
+                threshold: float = cfg.DESPIKE_THRESHOLD_DEFAULT,
                 inputs: Optional[Dict[str, str]] = None) -> DataState:
     return execute(store, "despike", {"window": window, "threshold": threshold}, inputs=inputs)
 
@@ -933,7 +966,8 @@ def _c_trace_edit(run: Run, p: dict) -> Computed:
             {"traces_killed": total, "detected_on": state_name(run.state(role))})
 
 
-def run_trace_kill(store: MutableMapping, dead_frac: float = 0.02, noisy_mult: float = 8.0,
+def run_trace_kill(store: MutableMapping, dead_frac: float = cfg.TRACE_KILL_DEAD_FRAC_DEFAULT,
+                   noisy_mult: float = cfg.TRACE_KILL_NOISY_MULT_DEFAULT,
                    inputs: Optional[Dict[str, str]] = None) -> DataState:
     """Kill dead/noisy traces. The mask is *measured* on amplitude-preserving
     data (upstream of any AGC / balancing in this data's history) and
@@ -966,12 +1000,10 @@ def _c_mute(run: Run, p: dict) -> Computed:
 
 
 def run_mute(store: MutableMapping, kind: str = "flat", *, taper: float = cfg.MUTE_TAPER_DEFAULT,
-             t_top: float = cfg.MUTE_TTOP_DEFAULT, velocity: float = 500.0, t0: float = 0.0,
-             x_min: float = 0.0, x_max: float = 0.0, t_min: float = 0.0, t_max: float = 0.0,
+             t_top: float = cfg.MUTE_TTOP_DEFAULT, velocity: float = cfg.MUTE_LINEAR_VELOCITY_DEFAULT,
+             t0: float = 0.0, x_min: float = 0.0, x_max: float = 0.0, t_min: float = 0.0, t_max: float = 0.0,
              inputs: Optional[Dict[str, str]] = None) -> DataState:
-    if kind not in ("flat", "linear", "surgical"):
-        _refuse(store, "mute", None, {"kind": kind},
-                f"Unknown mute type '{kind}' (expected flat, linear or surgical).")
+    _precheck(store, "mute", None, {"kind": kind})        # unknown mute type -> refused (and recorded)
     if kind == "flat":
         params = dict(kind=kind, t_top=t_top, taper=taper)
     elif kind == "linear":
@@ -1019,9 +1051,7 @@ def _c_fk(run: Run, p: dict) -> Computed:
 def run_fk(store: MutableMapping, polygon, mode: str = cfg.FK_POLYGON_MODE_DEFAULT,
            coeff: float = cfg.FK_REJECT_COEFFICIENT_DEFAULT, source_desc: str = "custom polygon",
            progress_cb: ProgressCb = None, inputs: Optional[Dict[str, str]] = None) -> DataState:
-    if polygon is None or len(polygon) < 3:
-        _refuse(store, "fk", None, {"polygon": polygon, "mode": mode, "coeff": coeff},
-                "An F-K polygon needs at least 3 vertices.")
+    _precheck(store, "fk", None, {"polygon": polygon, "mode": mode, "coeff": coeff})   # >= 3 vertices
     return execute(store, "fk", {"polygon": polygon, "mode": mode, "coeff": float(coeff)},
                    progress_cb=progress_cb, inputs=inputs, meta={"source": source_desc})
 
@@ -1039,7 +1069,8 @@ def _c_mult_supp(run: Run, p: dict) -> Computed:
     return _shot_out(run, ok), {}
 
 
-def run_mult_supp(store: MutableMapping, operator_length: int = 60, prediction_lag: int = 30,
+def run_mult_supp(store: MutableMapping, operator_length: int = cfg.MULT_SUPP_OPLEN_DEFAULT,
+                  prediction_lag: int = cfg.MULT_SUPP_LAG_DEFAULT,
                   pre_whitening: float = cfg.DECON_PW_DEFAULT, progress_cb: ProgressCb = None,
                   inputs: Optional[Dict[str, str]] = None) -> DataState:
     return execute(store, "mult_supp", {"operator_length": operator_length,
@@ -1250,7 +1281,7 @@ def _c_data_reg(run: Run, p: dict) -> Computed:
     return {"traces": out, "offsets": off_out, "live": live}, {}
 
 
-def run_data_reg(store: MutableMapping, n_offsets: int = 31,
+def run_data_reg(store: MutableMapping, n_offsets: int = cfg.DATA_REG_N_OFFSETS_DEFAULT,
                  inputs: Optional[Dict[str, str]] = None) -> DataState:
     return execute(store, "data_reg", {"n_offsets": int(n_offsets)}, inputs=inputs)
 
@@ -1389,7 +1420,7 @@ def _c_migration_pstm(run: Run, p: dict) -> Computed:
 
 
 def run_migration_pstm(store: MutableMapping, aperture_m: float = cfg.APERTURE_M_DEFAULT,
-                       cdp_stride: int = 3, progress_cb: ProgressCb = None,
+                       cdp_stride: int = cfg.PSTM_CDP_STRIDE_DEFAULT, progress_cb: ProgressCb = None,
                        inputs: Optional[Dict[str, str]] = None) -> DataState:
     """Pre-stack Kirchhoff time migration: needs pre-stack, offset-preserving CDP
     gathers (NOT NMO-corrected, NOT stacked) and a velocity field. It performs

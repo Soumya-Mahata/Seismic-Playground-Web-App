@@ -265,7 +265,13 @@ seismic-playground/
 │   │                           #   sweetness, variance, coherence + Petrel color map
 │   ├── interpretation.py      # horizon/fault data model, curvature, LAS reading,
 │   │                           #   statistical wavelet extraction, well-tie
-│   ├── pipeline.py            # recommended-order stage registry, STAGE_KIND, store defaults
+│   ├── registry.py            # THE operation registry: one declaration per operation (ids, names,
+│   │                           #   category, input/output data types, required inputs, recommended
+│   │                           #   predecessors, warnings, parameter schema, validation, processing
+│   │                           #   function, QC builder, help text) — everything below derives from it
+│   ├── registry_docs.py       # generates docs/OPERATIONS.md and docs/workflow_graph.json from it
+│   ├── pipeline.py            # recommended order / STAGE_KIND / ROOT_STAGES — views of the registry,
+│   │                           #   plus the store defaults
 │   ├── action_log.py          # the processing history: immutable, append-only, chronological
 │   │                           #   action log (frozen entries, hash chain, display-order views)
 │   ├── canonical.py           # canonical parameters + cheap array digests (shared by the
@@ -273,7 +279,7 @@ seismic-playground/
 │   ├── state_graph.py         # DataState + ProcessingGraph: INPUT STATE → OPERATION + PARAMETERS
 │   │                           #   → OUTPUT STATE; ids, fingerprints, current pointers, lineage,
 │   │                           #   undo/redo, discard, recipe — pure Python, no arrays
-│   ├── dependencies.py        # dependency engine: genuine needs (⛔) vs recommendations (⚠),
+│   ├── dependencies.py        # dependency engine: evaluates the registry's needs (⛔) and advice (⚠),
 │   │                           #   input resolution, stale-state detection — pure Python
 │   ├── stage_ops.py           # execute() + one executor per operation (calls the maths above,
 │   │                           #   stores the payloads, memoises, releases/re-computes memory,
@@ -302,6 +308,8 @@ seismic-playground/
 │   └── formatting.py
 ├── data/sample_data/            # shipped synthetic demo SEG-Y
 ├── docs/DEPENDENCY_MODEL.md     # the ⛔/⚠ dependency rules, in full
+├── docs/OPERATIONS.md           # every operation's declaration, rendered (GENERATED from the registry)
+├── docs/workflow_graph.json     # the same relations as plain data for workflow visualisation (GENERATED)
 ├── CLAUDE.md                    # contributor guide, incl. the data-state model
 ├── tests/                       # see "Testing" below
 ├── requirements.txt, .gitignore, .streamlit/config.toml
@@ -330,8 +338,9 @@ seismic-playground/
   that inherits the app's dark background loses most colormaps' contrast.
 - **Recommended order ≠ required inputs ≠ data states ≠ current state ≠
   history.** These used to be one hard-coded chain (`require_stage` + "stage N done clears
-  every later stage"). They are now separate: `pipeline.PIPELINE_STAGES`
-  is only the recommended order; `dependencies.STAGE_SPECS` declares each
+  every later stage"). They are now separate: the recommended order is the
+  order the operations are declared in `modules/registry.py` (advice only;
+  `pipeline.PIPELINE_STAGES` is a view of it); the same registry declares each
   operation's genuine `Need`s and its `Advice`; and what data *exists* is a
   graph of states (`modules/state_graph.py`) in which every operation
   records the state(s) it consumed, its parameters and the state it
@@ -343,6 +352,19 @@ seismic-playground/
   neither is computed from the recommended order or from each other.
   Rules: [`docs/DEPENDENCY_MODEL.md`](docs/DEPENDENCY_MODEL.md);
   state model and action log: [`CLAUDE.md`](CLAUDE.md).
+- **One registry, no second copy.** What an operation *is* — its name, category,
+  the data it reads and produces, what it requires and recommends, its
+  parameters (defaults from `config.py`, validity bounds), validation, compute
+  function, QC builder and help text — is declared once in
+  `modules/registry.py`. The workflow UI, the dependency engine, the
+  validation in `stage_ops.execute`, the history labels, the generated
+  [`docs/OPERATIONS.md`](docs/OPERATIONS.md) and the workflow-graph data
+  (`docs/workflow_graph.json`, `registry.workflow_graph()`) all read it, so a
+  dependency is never written down in two places. The old names
+  (`pipeline.PIPELINE_STAGES`, `dependencies.STAGE_SPECS`, …) remain as
+  derived views. Parameter bounds are *validity* bounds (what the maths can
+  use), not slider ranges; a value outside them is refused before any state
+  is made and the refusal is recorded in the history as `invalid`.
 - **Shot domain first, CDP domain second.** `gathers` (CDP-indexed) and
   `shot_gathers` (shot-indexed) are both dicts of per-gather dicts. The
   base set owns the native arrays (`traces`, `offsets` …); each processing
@@ -598,6 +620,15 @@ Surface (Time) Map → Attribute Analysis**:
   (22 tests): sequential ids that are never reused, what each state
   records, deterministic lineage fingerprints, current pointers, branching,
   undo/redo, dependents/ancestors, discard, reset, recipe, JSON export.
+- `tests/test_registry.py` — the operation registry (175 tests): the registry
+  is internally consistent (`registry.problems()` is empty), the examples from
+  the design brief (band-pass, AGC, NMO, stack, migration, statics), every
+  derived view equals what the registry declares, no dependency or stage table
+  is re-declared outside it (AST guards), every operation has its compute
+  function bound, every `run_*` wrapper records exactly the schema's defaults,
+  every declared bound is exactly the edge of what is accepted, invalid
+  parameters are refused before the maths and recorded, the generated
+  documentation is up to date, and the workflow graph has no dangling edges.
 - `tests/test_dependencies.py` — the dependency engine on a bare graph (90
   tests): the recommended order gives zero warnings at every step; the two
   non-standard orders from the design brief; every optional stage
@@ -648,6 +679,9 @@ Run (requires `pip install pytest` in addition to `requirements.txt`):
 pytest tests/test_pipeline.py -v
 python tests/manual_pipeline_check.py
 python tests/test_app_flow.py
+# the operation registry (and that the generated docs are current):
+pytest tests/test_registry.py -v
+python -m modules.registry_docs --check     # after editing the registry: python -m modules.registry_docs
 # state model and dependency rules:
 pytest tests/test_state_graph.py tests/test_dependencies.py tests/test_stage_ops.py tests/test_app_nonlinear.py -v
 # the processing history (immutable action log):

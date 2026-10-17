@@ -8,9 +8,10 @@ Python, so every rule here is unit-tested without a UI.
 Five ideas kept apart (they used to be one hard-coded chain):
 
   RECOMMENDED ORDER      `pipeline.PIPELINE_STAGES` — advice, never enforced.
-  GENUINE DEPENDENCIES   `StageSpec.needs`  — an input state the computation
+  GENUINE DEPENDENCIES   `Operation.needs` — an input state the computation
                          cannot run without. Missing  ->  ⛔ blocked.
-  RECOMMENDATIONS        `StageSpec.advice` — scientifically preferable
+                         `Operation.exclusions` — data it must not read  ->  ⛔.
+  RECOMMENDATIONS        `Operation.advice` — scientifically preferable
                          ordering. Missing / out of order  ->  ⚠ warning.
   DATA STATES            `state_graph.ProcessingGraph` — what data exists and
                          how each state was made: INPUT STATE -> OPERATION +
@@ -26,6 +27,12 @@ produced". The default is the most preferred candidate that exists; a
 person (or a test) can name any other candidate state explicitly
 (`inputs={'data': 'S4'}`) — that is how an operation is applied to an
 earlier state, or redone with different parameters.
+
+What this file does NOT contain: the declarations. Every need, piece of advice,
+exclusion, name and location is declared once, in `modules/registry.py`; this file
+*evaluates* those declarations against a graph. (The old names — `STAGE_SPECS`,
+`STREAM_BASE`, `SHORT`, `PHRASE`, `STAGE_LOCATION`, `KIND_LABELS`, `STATUS_ROWS` —
+remain importable from here as views of the registry.)
 
 Nothing is ever overwritten. Re-running an operation creates a new state;
 states built from the old one are flagged *stale* (still valid data, just
@@ -45,9 +52,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
 
-from modules.pipeline import PIPELINE_STAGES, STAGE_KIND, stage_label
+from modules import registry
+from modules.registry import Advice, Need, Operation        # noqa: F401 — re-exported (declared in the registry)
+from modules.registry import stage_label
 from modules.state_graph import DataState, ProcessingGraph
 
 
@@ -125,71 +134,26 @@ class StageCheck:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Streams (a "stream" is a kind of data whose current state is the next input)
+# Names and streams — views of the registry (kept under their old names)
 # ─────────────────────────────────────────────────────────────────────────
+# A "stream" is a kind of data whose current state is the next input.
 
-STREAM_BASE: Dict[str, str] = {"shot": "shot_gathers", "cdp": "cdp_sort", "section": "stack"}
-STREAM_MEMBERS: Dict[str, Tuple[str, ...]] = {
-    kind: tuple(op for op, k in STAGE_KIND.items() if k == kind and op != STREAM_BASE[kind])
-    for kind in STREAM_BASE}
+STREAM_BASE: Dict[str, str] = dict(registry.STREAM_BASE)
+STREAM_MEMBERS: Dict[str, Tuple[str, ...]] = dict(registry.STREAM_MEMBERS)
 SHOT_OPERATORS: Tuple[str, ...] = STREAM_MEMBERS["shot"]
 
 # Where in the app each stage lives — used to tell a person where to go.
-STAGE_LOCATION: Dict[str, str] = {
-    "upload": "Data Management → ① Load data",
-    "shot_gathers": "Data Management → ⑥ Build shot gathers",
-    "bandpass": "Pre-Stack Conditioning → Band-Pass",
-    "agc": "Pre-Stack Conditioning → Amplitude Recovery",
-    "despike": "Pre-Stack Conditioning → De-spike",
-    "trace_edit": "Pre-Stack Conditioning → Trace Edit/Kill",
-    "mute": "Pre-Stack Conditioning → Mute",
-    "balance": "Pre-Stack Conditioning → Trace Balancing",
-    "fk": "Pre-Stack Conditioning → F-K Filter",
-    "mult_supp": "Pre-Stack Conditioning → Multiple Suppression",
-    "decon": "Pre-Stack Conditioning → Deconvolution",
-    "cdp_sort": "CDP Sort & Binning",
-    "vel1": "Velocity, NMO & DMO → Velocity Pass 1",
-    "nmo1": "Velocity, NMO & DMO → NMO Pass 1",
-    "statics": "Velocity, NMO & DMO → Residual Statics",
-    "dmo": "Velocity, NMO & DMO → DMO Correction",
-    "inv_nmo": "Velocity, NMO & DMO → Inverse NMO",
-    "data_reg": "Velocity, NMO & DMO → Data Regularisation",
-    "vel2": "Velocity, NMO & DMO → RMS Velocity Analysis (Pass 2)",
-    "nmo_final": "Velocity, NMO & DMO → Final NMO",
-    "stack": "Stacking",
-    "rna": "Post-Stack Processing → Random Noise Attenuation",
-    "decon_post": "Post-Stack Processing → Deconvolution",
-    "tvf": "Post-Stack Processing → Time-Variant Filter",
-    "migration": "Migration",
-    "final_scale": "Migration → Final scaling",
-}
+STAGE_LOCATION: Dict[str, str] = {sid: o.location for sid, o in zip(registry.stage_ids(), registry.stages())}
 
 # Short names for the data-state chain ("Raw → Band-pass → F-K").
-SHORT: Dict[str, str] = {
-    "upload": "Load", "shot_gathers": "Raw", "bandpass": "Band-pass", "agc": "AGC",
-    "despike": "De-spike", "trace_edit": "Trace kill", "mute": "Mute", "balance": "Balance",
-    "fk": "F-K", "mult_supp": "Multiple suppression", "decon": "Decon", "cdp_sort": "CDP sort",
-    "vel1": "Velocity 1", "nmo1": "NMO 1", "statics": "Statics", "dmo": "DMO",
-    "inv_nmo": "Inverse NMO", "data_reg": "Regularised", "vel2": "Velocity 2",
-    "nmo_final": "Final NMO", "stack": "Stack", "rna": "RNA", "decon_post": "Post-stack decon",
-    "tvf": "TVF", "migration": "Migration", "final_scale": "Final scaling",
-}
+SHORT: Dict[str, str] = {sid: o.short_name for sid, o in zip(registry.stage_ids(), registry.stages())}
 
-# How a stage is named inside a recommendation sentence.
-PHRASE: Dict[str, str] = {
-    "bandpass": "band-pass filtering", "agc": "amplitude recovery (AGC)", "despike": "de-spiking",
-    "trace_edit": "trace edit/kill", "mute": "muting", "balance": "trace balancing",
-    "fk": "F-K filtering", "mult_supp": "multiple suppression", "decon": "deconvolution",
-    "statics": "the residual-statics correction", "dmo": "DMO", "inv_nmo": "inverse NMO",
-    "data_reg": "data regularisation", "vel2": "pass-2 velocity analysis",
-    "nmo_final": "final NMO", "rna": "random noise attenuation",
-    "decon_post": "post-stack deconvolution", "tvf": "time-variant filtering",
-    "migration": "migration", "cdp_sort": "CDP sort",
-}
+# How a stage is named inside a recommendation sentence (only where it differs from its label).
+PHRASE: Dict[str, str] = {sid: o.phrase for sid, o in zip(registry.stage_ids(), registry.stages()) if o.phrase}
 
 
 def _phrase(stage_id: str) -> str:
-    return PHRASE.get(stage_id, stage_label(stage_id))
+    return registry.phrase(stage_id)
 
 
 def _cap(text: str) -> str:
@@ -265,202 +229,19 @@ class Workflow:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Rules
+# Rules — declared in the registry (`Need`, `Advice`, `Exclusion` on each `Operation`)
 # ─────────────────────────────────────────────────────────────────────────
 
-@dataclass(frozen=True)
-class Need:
-    """One genuine input of a stage.
+StageSpec = Operation        # a "spec" is the registry's declaration of the operation
 
-    `candidates` are tried in order of preference. A token starting with
-    '@' means "the current state of that kind" ('@shot', '@cdp',
-    '@section'); anything else is a stage id whose latest state is the
-    input. If a candidate other than the first supplies the input and
-    `fallback` is set, the stage is still runnable but gets a ⚠ with that
-    text.
+STAGE_SPECS: Dict[str, Operation] = dict(registry.BY_KEY)
 
-    `track`: a finished state is *stale* when the input this need would
-    resolve to today is not the one it recorded."""
-    role: str
-    candidates: Tuple[str, ...]
-    what: str
-    why: str = ""
-    fix: str = ""
-    fallback: str = ""
-    track: bool = False
+MIGRATION_VARIANTS = {o.variant: o.variant_label[:1].upper() + o.variant_label[1:]
+                      for o in registry.variants("migration")}
 
 
-@dataclass(frozen=True)
-class Advice:
-    """A scientifically preferable ordering — never blocks.
-
-    mode "all": each listed stage should be in the lineage of the data
-    this stage reads (one ⚠ naming whichever are missing).
-    mode "any": at least one should be."""
-    stages: Tuple[str, ...]
-    reason: str
-    mode: str = "all"
-    message: str = ""     # overrides the generated sentence
-
-
-@dataclass(frozen=True)
-class StageSpec:
-    needs: Tuple[Need, ...] = ()
-    advice: Tuple[Advice, ...] = ()
-    checks: Tuple[Callable[[Workflow, Dict[str, Optional[DataState]]], List[Issue]], ...] = ()
-
-
-def _statics_geometry(wf: Workflow, inputs: Dict[str, Optional[DataState]]) -> List[Issue]:
-    data = inputs.get("data")
-    if data is not None and "data_reg" in wf.lineage_ops(data.id):
-        return [Issue(
-            Level.BLOCKED, "geometry",
-            "Residual statics are surface-consistent: they need each trace's own shot and receiver. "
-            "Regularised gathers hold interpolated traces on a synthetic offset grid, so that "
-            "identity is gone.",
-            stages=("data_reg",), states=(data.id,),
-            fix="Apply residual statics before Data Regularisation (or choose gathers that were not "
-                "regularised as the input).")]
-    return []
-
-
-_SHOT = Need("data", ("@shot",), "shot gathers", fix="Build shot gathers (Data Management)",
-             why="Pre-stack conditioning runs on shot gathers.")
-_CDP_HEAD = Need("data", ("@cdp",), "CDP gathers", fix="Run CDP Sort & Binning")
-_VEL_BEST_FALLBACK = ("Pass-2 velocity analysis has not been performed — the pass-1 (approximate) "
-                      "velocities will be used.")
-
-STAGE_SPECS: Dict[str, StageSpec] = {
-    "upload": StageSpec(),
-    "shot_gathers": StageSpec(needs=(
-        Need("data", ("upload",), "a loaded survey", fix="Load a SEG-Y file or generate synthetic "
-             "data (Data Management)"),)),
-
-    # ---- shot-domain conditioning: each only needs shot gathers -------------
-    "bandpass": StageSpec(needs=(_SHOT,)),
-    "agc": StageSpec(needs=(_SHOT,), advice=(
-        Advice(("bandpass",), "AGC amplifies everything in the trace, including out-of-band noise, so "
-                              "the gain is driven by the useful reflection band only if the data "
-                              "were filtered first."),)),
-    "despike": StageSpec(needs=(_SHOT,)),
-    "trace_edit": StageSpec(needs=(_SHOT,)),
-    "mute": StageSpec(needs=(_SHOT,)),
-    "balance": StageSpec(needs=(_SHOT,)),
-    "fk": StageSpec(needs=(_SHOT,)),
-    "mult_supp": StageSpec(needs=(_SHOT,), advice=(
-        Advice(("bandpass", "agc"), "Predictive deconvolution assumes a stationary, noise-limited "
-                                    "trace; band-pass filtering and amplitude recovery are normally "
-                                    "applied first."),)),
-    "decon": StageSpec(needs=(_SHOT,), advice=(
-        Advice(("bandpass", "agc"), "Spiking deconvolution assumes a stationary, noise-limited trace: a "
-                                    "wide band-pass and amplitude recovery are normally applied "
-                                    "first (4 Deconvolution, 'Preconditioning')."),
-        Advice(("mute", "fk"), "Coherent noise (ground roll, direct arrival) is normally removed "
-                               "before deconvolution so it is not treated as part of the wavelet.",
-               mode="any"),)),
-
-    # ---- CDP sort: only a survey is genuinely required ----------------------
-    "cdp_sort": StageSpec(
-        needs=(Need("data", ("@shot", "upload"), "traces to sort (a loaded survey)",
-                    fix="Load data (Data Management)", track=True),),
-        advice=(Advice(SHOT_OPERATORS, "", mode="any",
-                       message="No pre-stack conditioning has been applied, so the CDP gathers will be "
-                               "built from the raw, unconditioned traces. (Fine for data that were "
-                               "already processed.)"),)),
-
-    # ---- velocity / NMO / statics / DMO / regularisation --------------------
-    "vel1": StageSpec(needs=(Need("data", ("cdp_sort",), "CDP gathers", fix="Run CDP Sort & Binning",
-                                  why="Velocity analysis scans offset-sorted CDP gathers.",
-                                  track=True),)),
-    "nmo1": StageSpec(needs=(
-        Need("data", ("cdp_sort",), "CDP gathers", fix="Run CDP Sort & Binning", track=True),
-        Need("velocity", ("vel1",), "pass-1 stacking velocities", fix=STAGE_LOCATION["vel1"],
-             why="NMO correction is defined by a velocity function.", track=True))),
-    "statics": StageSpec(
-        needs=(_CDP_HEAD,
-               Need("nmo", ("nmo1",), "NMO-flattened gathers (NMO Pass 1)", fix=STAGE_LOCATION["nmo1"],
-                    why="Residual statics are estimated by cross-correlating NMO-flattened traces "
-                        "with a pilot trace.", track=True)),
-        checks=(_statics_geometry,)),
-    "dmo": StageSpec(
-        needs=(_CDP_HEAD,
-               Need("velocity", ("vel1",), "pass-1 stacking velocities", fix=STAGE_LOCATION["vel1"],
-                    why="DMO acts on NMO-corrected data, so it needs the velocities that flatten the "
-                        "gathers first.", track=True)),
-        advice=(Advice(("statics",), "Residual statics are normally applied before DMO so the DMO "
-                                     "stretch does not smear uncorrected shifts."),)),
-    "inv_nmo": StageSpec(needs=(
-        Need("data", ("dmo",), "DMO-corrected gathers", fix=STAGE_LOCATION["dmo"],
-             why="Inverse NMO undoes pass-1 NMO on the DMO output.", track=True),
-        Need("velocity", ("vel1",), "pass-1 stacking velocities", fix=STAGE_LOCATION["vel1"],
-             track=True))),
-    "data_reg": StageSpec(needs=(_CDP_HEAD,)),
-    "vel2": StageSpec(needs=(_CDP_HEAD,), advice=(
-        Advice(("statics", "inv_nmo", "data_reg"), "", mode="any",
-               message="No refinement (residual statics, DMO or regularisation) has been applied since "
-                       "pass 1, so pass-2 velocity analysis will re-analyse essentially the same "
-                       "data."),)),
-    "nmo_final": StageSpec(needs=(
-        Need("data", ("@cdp",), "CDP gathers", fix="Run CDP Sort & Binning", track=True),
-        Need("velocity", ("vel2", "vel1"), "stacking velocities", fix=STAGE_LOCATION["vel1"],
-             why="NMO correction is defined by a velocity function.", fallback=_VEL_BEST_FALLBACK,
-             track=True))),
-
-    # ---- stack and post-stack ------------------------------------------------
-    "stack": StageSpec(needs=(
-        Need("data", ("nmo_final", "nmo1"), "NMO-corrected CDP gathers",
-             fix="Apply NMO (Velocity, NMO & DMO → NMO Pass 1 or Final NMO)",
-             why="Stacking sums traces at each CDP; without moveout correction reflections stack "
-                 "out of phase.",
-             fallback="Final NMO has not been applied — the pass-1 NMO output will be stacked "
-                      "(approximate moveout correction, and none of the later refinements).",
-             track=True),)),
-    "rna": StageSpec(needs=(Need("data", ("@section",), "a stacked section", fix="Run Stacking"),)),
-    "decon_post": StageSpec(
-        needs=(Need("data", ("@section",), "a stacked section", fix="Run Stacking"),),
-        advice=(Advice(("rna",), "Noise attenuation is normally applied first so deconvolution does not "
-                                 "sharpen random noise."),)),
-    "tvf": StageSpec(
-        needs=(Need("data", ("@section",), "a stacked section", fix="Run Stacking"),),
-        advice=(Advice(("decon_post",), "The time-variant filter normally follows deconvolution, "
-                                        "removing the high-frequency noise it boosts."),)),
-
-    # ---- migration (two implementations, two sets of inputs) ----------------
-    "migration:poststack": StageSpec(
-        needs=(Need("data", ("@section",), "a stacked section", fix="Run Stacking",
-                    why="Post-stack migration operates on a stacked (≈ zero-offset) section.",
-                    track=True),
-               Need("velocity", ("vel2", "vel1"), "a stacking-velocity field (the migration velocity)",
-                    fix=STAGE_LOCATION["vel1"], fallback=_VEL_BEST_FALLBACK.replace(
-                        "will be used", "will be used as the migration velocity"), track=True)),
-        advice=(Advice(("rna", "decon_post", "tvf"), "Post-stack conditioning is normally applied "
-                       "before migration so noise is not migrated into the image."),)),
-    "migration:pstm": StageSpec(
-        needs=(Need("data", ("@cdp",), "pre-stack CDP gathers with their offsets preserved",
-                    fix="Run CDP Sort & Binning", track=True,
-                    why="PSTM sums pre-stack traces using their true offsets, so it cannot use "
-                        "stacked or NMO-corrected data."),
-               Need("velocity", ("vel2", "vel1"), "a stacking-velocity field (the migration velocity)",
-                    fix=STAGE_LOCATION["vel1"], fallback=_VEL_BEST_FALLBACK.replace(
-                        "will be used", "will be used as the migration velocity"), track=True)),
-        advice=(Advice(("data_reg",), "Regularised offsets give the migration a consistent offset "
-                                      "sampling at every CDP."),)),
-    "final_scale": StageSpec(needs=(
-        Need("data", ("migration", "@section"), "a section to scale", fix="Run Stacking",
-             fallback="Migration has not been applied — final scaling will be applied to the "
-                      "un-migrated section.", track=True),)),
-}
-
-MIGRATION_VARIANTS = {"poststack": "Post-stack", "pstm": "Pre-stack (PSTM)"}
-
-
-def get_spec(stage_id: str, variant: Optional[str] = None) -> StageSpec:
-    key = f"{stage_id}:{variant}" if variant else stage_id
-    if key not in STAGE_SPECS:
-        if stage_id == "migration":
-            raise ValueError("Migration needs a variant: 'poststack' or 'pstm'.")
-        raise KeyError(f"No dependency spec for stage '{stage_id}'")
-    return STAGE_SPECS[key]
+def get_spec(stage_id: str, variant: Optional[str] = None) -> Operation:
+    return registry.get(stage_id, variant)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -569,9 +350,15 @@ def check_stage(wf: Workflow, stage_id: str, variant: Optional[str] = None,
             issues.append(Issue(Level.WARNING, "fallback_input", need.fallback,
                                 stages=(c.state.op,), states=(c.state.id,)))
 
-    # extra structural checks (e.g. trace geometry) ---------------------------------
-    for chk in spec.checks:
-        issues.extend(chk(wf, states))
+    # exclusions: data this operation must not read (e.g. trace geometry) --------------
+    for exc in spec.exclusions:
+        src = states.get(exc.role)
+        if src is None:
+            continue
+        hit = tuple(s_ for s_ in exc.stages if s_ in wf.lineage_ops(src.id))
+        if hit:
+            issues.append(Issue(Level.BLOCKED, exc.kind, exc.message, stages=hit, states=(src.id,),
+                                fix=exc.fix))
 
     data_c = chosen.get("data")
     data = data_c.state if data_c else None
@@ -745,14 +532,10 @@ def stale_notes(wf: Workflow) -> Dict[str, str]:
 # Whole-workflow views
 # ─────────────────────────────────────────────────────────────────────────
 
-# (stage id, variant, display label) for every row of the status panel.
-STATUS_ROWS: List[Tuple[str, Optional[str], str]] = []
-for _s in PIPELINE_STAGES:
-    if _s.id == "migration":
-        STATUS_ROWS.append(("migration", "poststack", "Migration — post-stack"))
-        STATUS_ROWS.append(("migration", "pstm", "Migration — pre-stack (PSTM)"))
-    else:
-        STATUS_ROWS.append((_s.id, None, _s.label))
+# (stage id, variant, display label) for every row of the status panel: one per registered
+# operation, in the recommended order (migration appears once per implementation).
+STATUS_ROWS: List[Tuple[str, Optional[str], str]] = [
+    (o.id, o.variant or None, o.full_name) for o in registry.OPERATIONS]
 
 
 def check_all(wf: Workflow) -> List[Tuple[str, Optional[str], str, StageCheck]]:
@@ -781,10 +564,7 @@ def describe_stream(wf: Workflow, kind: str) -> str:
 
 
 # What each kind of data is called in the "current processing state" summary.
-KIND_LABELS: Dict[str, str] = {
-    "shot": "Shot-domain data", "cdp": "CDP gathers", "velocity": "Velocity field",
-    "nmo": "NMO-corrected gathers", "dmo": "DMO output", "section": "Stacked / post-stack section",
-    "image": "Migrated image", "final": "Final section"}
+KIND_LABELS: Dict[str, str] = {t.id: t.label for t in registry.DATA_TYPES if t.summarised}
 
 
 def current_processing_state(wf: Workflow) -> List[Dict[str, object]]:
@@ -816,10 +596,4 @@ def current_processing_state(wf: Workflow) -> List[Dict[str, object]]:
 def advice_pairs() -> List[Tuple[str, str]]:
     """(earlier, later) pairs implied by every `Advice` — used by tests to
     assert the recommendations agree with the recommended order."""
-    pairs = []
-    for key, spec in STAGE_SPECS.items():
-        later = key.split(":")[0]
-        for adv in spec.advice:
-            for earlier in adv.stages:
-                pairs.append((earlier, later))
-    return pairs
+    return registry.advice_pairs()

@@ -88,6 +88,40 @@ def validate_frequency_band(fmin: float, fmax: float, nyquist: float) -> None:
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Per-operation parameter validators (declared on the operations in
+# `modules/registry.py`; run by `stage_ops.execute` before any maths).
+#
+# Signature: (params, survey=None) -> None, raising `ValidationError`. `params`
+# may be partial (a caller checking arguments before it has built the whole
+# parameter set), so each validator checks only what is present. `survey` is the
+# loaded survey when one is available — the checks that depend on the data
+# (a Nyquist limit) use it; without it only the data-independent part runs.
+# ─────────────────────────────────────────────────────────────────────────
+
+def check_bandpass_params(params, survey=None) -> None:
+    fmin, fmax = params.get("fmin"), params.get("fmax")
+    if fmin is None or fmax is None:
+        return
+    nyquist = 0.5 / survey.sample_interval if survey is not None else float("inf")
+    validate_frequency_band(fmin, fmax, nyquist)
+
+
+def check_fk_polygon_params(params, survey=None) -> None:
+    if "polygon" not in params:
+        return
+    polygon = params["polygon"]
+    if polygon is None or len(polygon) < 3:
+        raise ValidationError("An F-K polygon needs at least 3 vertices.")
+
+
+def check_velocity_scan_params(params, survey=None) -> None:
+    vmin, vmax = params.get("vmin"), params.get("vmax")
+    if vmin is not None and vmax is not None and vmin >= vmax:
+        raise ValidationError(f"The minimum scan velocity ({vmin} m/s) must be less than the "
+                              f"maximum ({vmax} m/s).")
+
+
 def require_gather_key(gathers: Optional[dict], key: str, what: str, stage_name: str = "") -> None:
     """Data-level guard: every gather in `gathers` must carry `key`.
 

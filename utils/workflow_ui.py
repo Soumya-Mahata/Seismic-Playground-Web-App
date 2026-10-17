@@ -33,6 +33,7 @@ from modules.action_log import (FAILURE, ORDER_LABELS, ORDERS, Action, format_pa
                                 one_line, report_lines, result_text)
 from modules.dependencies import (Level, StageCheck, check_all, current_processing_state,
                                   describe_lineage, describe_stream, stale_info, stale_notes, state_name)
+from modules import registry
 from modules.pipeline import PIPELINE_STAGES, STAGE_GROUPS, STAGE_KIND, stage_label
 from modules.state_graph import DataState
 from modules.validation import ValidationError
@@ -481,8 +482,7 @@ def home_status() -> None:
 #
 # The functions below draw the first and the third. Neither is computed from the other.
 
-_CURRENT_ICONS = {"shot": "🔧", "cdp": "🔀", "velocity": "🎯", "nmo": "📐", "dmo": "📐",
-                  "section": "📚", "image": "🗺️", "final": "🏁"}
+_CURRENT_ICONS = {t.id: t.icon for t in registry.DATA_TYPES if t.summarised}    # declared in the registry
 
 
 def current_state_panel(compact: bool = False) -> None:

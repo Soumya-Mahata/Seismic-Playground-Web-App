@@ -1,0 +1,1002 @@
+{
+ "recommended_order": [
+  "upload",
+  "shot_gathers",
+  "bandpass",
+  "agc",
+  "despike",
+  "trace_edit",
+  "mute",
+  "balance",
+  "fk",
+  "mult_supp",
+  "decon",
+  "cdp_sort",
+  "vel1",
+  "nmo1",
+  "statics",
+  "dmo",
+  "inv_nmo",
+  "data_reg",
+  "vel2",
+  "nmo_final",
+  "stack",
+  "rna",
+  "decon_post",
+  "tvf",
+  "migration:poststack",
+  "migration:pstm",
+  "final_scale"
+ ],
+ "nodes": [
+  {
+   "id": "upload",
+   "type": "operation",
+   "label": "Load Data",
+   "category": "data",
+   "group": "data",
+   "step": "1",
+   "optional": false,
+   "output": "raw"
+  },
+  {
+   "id": "shot_gathers",
+   "type": "operation",
+   "label": "Build Shot Gathers",
+   "category": "data",
+   "group": "data",
+   "step": "1",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "bandpass",
+   "type": "operation",
+   "label": "Band-Pass Filter",
+   "category": "filtering",
+   "group": "prestack",
+   "step": "2",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "agc",
+   "type": "operation",
+   "label": "Amplitude Recovery (AGC)",
+   "category": "gain",
+   "group": "prestack",
+   "step": "3",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "despike",
+   "type": "operation",
+   "label": "De-spike",
+   "category": "editing",
+   "group": "prestack",
+   "step": "4a",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "trace_edit",
+   "type": "operation",
+   "label": "Trace Edit / Kill",
+   "category": "editing",
+   "group": "prestack",
+   "step": "4b",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "mute",
+   "type": "operation",
+   "label": "Mute",
+   "category": "editing",
+   "group": "prestack",
+   "step": "5",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "balance",
+   "type": "operation",
+   "label": "Trace Balancing",
+   "category": "gain",
+   "group": "prestack",
+   "step": "6",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "fk",
+   "type": "operation",
+   "label": "F-K Dip Filter",
+   "category": "filtering",
+   "group": "prestack",
+   "step": "7",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "mult_supp",
+   "type": "operation",
+   "label": "Multiple Suppression",
+   "category": "deconvolution",
+   "group": "prestack",
+   "step": "8",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "decon",
+   "type": "operation",
+   "label": "Deconvolution",
+   "category": "deconvolution",
+   "group": "prestack",
+   "step": "9",
+   "optional": true,
+   "output": "shot"
+  },
+  {
+   "id": "cdp_sort",
+   "type": "operation",
+   "label": "CDP Sort / Binning",
+   "category": "data",
+   "group": "velocity",
+   "step": "10",
+   "optional": false,
+   "output": "cdp"
+  },
+  {
+   "id": "vel1",
+   "type": "operation",
+   "label": "Velocity Analysis — Pass 1",
+   "category": "velocity",
+   "group": "velocity",
+   "step": "11",
+   "optional": false,
+   "output": "velocity"
+  },
+  {
+   "id": "nmo1",
+   "type": "operation",
+   "label": "NMO Correction — Pass 1",
+   "category": "moveout",
+   "group": "velocity",
+   "step": "12",
+   "optional": false,
+   "output": "nmo"
+  },
+  {
+   "id": "statics",
+   "type": "operation",
+   "label": "Residual Statics",
+   "category": "statics",
+   "group": "velocity",
+   "step": "13",
+   "optional": true,
+   "output": "cdp"
+  },
+  {
+   "id": "dmo",
+   "type": "operation",
+   "label": "DMO Correction",
+   "category": "moveout",
+   "group": "velocity",
+   "step": "14",
+   "optional": true,
+   "output": "dmo"
+  },
+  {
+   "id": "inv_nmo",
+   "type": "operation",
+   "label": "Inverse NMO",
+   "category": "moveout",
+   "group": "velocity",
+   "step": "15",
+   "optional": true,
+   "output": "cdp"
+  },
+  {
+   "id": "data_reg",
+   "type": "operation",
+   "label": "Data Regularisation",
+   "category": "regularisation",
+   "group": "velocity",
+   "step": "15b",
+   "optional": true,
+   "output": "cdp"
+  },
+  {
+   "id": "vel2",
+   "type": "operation",
+   "label": "RMS Velocity Analysis (Pass 2)",
+   "category": "velocity",
+   "group": "velocity",
+   "step": "16",
+   "optional": true,
+   "output": "velocity"
+  },
+  {
+   "id": "nmo_final",
+   "type": "operation",
+   "label": "Final NMO",
+   "category": "moveout",
+   "group": "velocity",
+   "step": "17",
+   "optional": false,
+   "output": "nmo"
+  },
+  {
+   "id": "stack",
+   "type": "operation",
+   "label": "Stack",
+   "category": "stacking",
+   "group": "stack",
+   "step": "18",
+   "optional": false,
+   "output": "section"
+  },
+  {
+   "id": "rna",
+   "type": "operation",
+   "label": "Random Noise Attenuation",
+   "category": "filtering",
+   "group": "stack",
+   "step": "19",
+   "optional": true,
+   "output": "section"
+  },
+  {
+   "id": "decon_post",
+   "type": "operation",
+   "label": "Deconvolution (post-stack)",
+   "category": "deconvolution",
+   "group": "stack",
+   "step": "20",
+   "optional": true,
+   "output": "section"
+  },
+  {
+   "id": "tvf",
+   "type": "operation",
+   "label": "Time-Variant Filter",
+   "category": "filtering",
+   "group": "stack",
+   "step": "21",
+   "optional": true,
+   "output": "section"
+  },
+  {
+   "id": "migration:poststack",
+   "type": "operation",
+   "label": "Migration — post-stack",
+   "category": "migration",
+   "group": "stack",
+   "step": "22",
+   "optional": true,
+   "output": "image"
+  },
+  {
+   "id": "migration:pstm",
+   "type": "operation",
+   "label": "Migration — pre-stack (PSTM)",
+   "category": "migration",
+   "group": "stack",
+   "step": "22",
+   "optional": true,
+   "output": "image"
+  },
+  {
+   "id": "final_scale",
+   "type": "operation",
+   "label": "Final Scaling",
+   "category": "gain",
+   "group": "stack",
+   "step": "23",
+   "optional": true,
+   "output": "final"
+  },
+  {
+   "id": "data:raw",
+   "type": "data",
+   "label": "Loaded survey",
+   "icon": "📂"
+  },
+  {
+   "id": "data:shot",
+   "type": "data",
+   "label": "Shot-domain data",
+   "icon": "🔧"
+  },
+  {
+   "id": "data:cdp",
+   "type": "data",
+   "label": "CDP gathers",
+   "icon": "🔀"
+  },
+  {
+   "id": "data:velocity",
+   "type": "data",
+   "label": "Velocity field",
+   "icon": "🎯"
+  },
+  {
+   "id": "data:nmo",
+   "type": "data",
+   "label": "NMO-corrected gathers",
+   "icon": "📐"
+  },
+  {
+   "id": "data:dmo",
+   "type": "data",
+   "label": "DMO output",
+   "icon": "📐"
+  },
+  {
+   "id": "data:section",
+   "type": "data",
+   "label": "Stacked / post-stack section",
+   "icon": "📚"
+  },
+  {
+   "id": "data:image",
+   "type": "data",
+   "label": "Migrated image",
+   "icon": "🗺️"
+  },
+  {
+   "id": "data:final",
+   "type": "data",
+   "label": "Final section",
+   "icon": "🏁"
+  }
+ ],
+ "edges": [
+  {
+   "from": "upload",
+   "to": "data:raw",
+   "type": "produces"
+  },
+  {
+   "from": "shot_gathers",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "upload",
+   "type": "requires",
+   "to": "shot_gathers",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "bandpass",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "bandpass",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "agc",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "agc",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "bandpass",
+   "to": "agc",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "AGC amplifies everything in the trace, including out-of-band noise, so the gain is driven by the useful reflection band only if the data were filtered first."
+  },
+  {
+   "from": "despike",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "despike",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "trace_edit",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "trace_edit",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "mute",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "mute",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "balance",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "balance",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "fk",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "fk",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "mult_supp",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "mult_supp",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "bandpass",
+   "to": "mult_supp",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Predictive deconvolution assumes a stationary, noise-limited trace; band-pass filtering and amplitude recovery are normally applied first."
+  },
+  {
+   "from": "agc",
+   "to": "mult_supp",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Predictive deconvolution assumes a stationary, noise-limited trace; band-pass filtering and amplitude recovery are normally applied first."
+  },
+  {
+   "from": "decon",
+   "to": "data:shot",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "decon",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "bandpass",
+   "to": "decon",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Spiking deconvolution assumes a stationary, noise-limited trace: a wide band-pass and amplitude recovery are normally applied first (4 Deconvolution, 'Preconditioning')."
+  },
+  {
+   "from": "agc",
+   "to": "decon",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Spiking deconvolution assumes a stationary, noise-limited trace: a wide band-pass and amplitude recovery are normally applied first (4 Deconvolution, 'Preconditioning')."
+  },
+  {
+   "from": "mute",
+   "to": "decon",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "Coherent noise (ground roll, direct arrival) is normally removed before deconvolution so it is not treated as part of the wavelet."
+  },
+  {
+   "from": "fk",
+   "to": "decon",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "Coherent noise (ground roll, direct arrival) is normally removed before deconvolution so it is not treated as part of the wavelet."
+  },
+  {
+   "from": "cdp_sort",
+   "to": "data:cdp",
+   "type": "produces"
+  },
+  {
+   "from": "data:shot",
+   "type": "consumes",
+   "to": "cdp_sort",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "upload",
+   "type": "requires",
+   "to": "cdp_sort",
+   "role": "data",
+   "preferred": false,
+   "tracked": true
+  },
+  {
+   "from": "bandpass",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "agc",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "despike",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "trace_edit",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "mute",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "balance",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "fk",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "mult_supp",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "decon",
+   "to": "cdp_sort",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No pre-stack conditioning has been applied, so the CDP gathers will be built from the raw, unconditioned traces. (Fine for data that were already processed.)"
+  },
+  {
+   "from": "vel1",
+   "to": "data:velocity",
+   "type": "produces"
+  },
+  {
+   "from": "cdp_sort",
+   "type": "requires",
+   "to": "vel1",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "nmo1",
+   "to": "data:nmo",
+   "type": "produces"
+  },
+  {
+   "from": "cdp_sort",
+   "type": "requires",
+   "to": "nmo1",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "vel1",
+   "type": "requires",
+   "to": "nmo1",
+   "role": "velocity",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "statics",
+   "to": "data:cdp",
+   "type": "produces"
+  },
+  {
+   "from": "data:cdp",
+   "type": "consumes",
+   "to": "statics",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "nmo1",
+   "type": "requires",
+   "to": "statics",
+   "role": "nmo",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "data_reg",
+   "to": "statics",
+   "type": "excludes",
+   "role": "data"
+  },
+  {
+   "from": "dmo",
+   "to": "data:dmo",
+   "type": "produces"
+  },
+  {
+   "from": "data:cdp",
+   "type": "consumes",
+   "to": "dmo",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "vel1",
+   "type": "requires",
+   "to": "dmo",
+   "role": "velocity",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "statics",
+   "to": "dmo",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Residual statics are normally applied before DMO so the DMO stretch does not smear uncorrected shifts."
+  },
+  {
+   "from": "inv_nmo",
+   "to": "data:cdp",
+   "type": "produces"
+  },
+  {
+   "from": "dmo",
+   "type": "requires",
+   "to": "inv_nmo",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "vel1",
+   "type": "requires",
+   "to": "inv_nmo",
+   "role": "velocity",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "data_reg",
+   "to": "data:cdp",
+   "type": "produces"
+  },
+  {
+   "from": "data:cdp",
+   "type": "consumes",
+   "to": "data_reg",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "vel2",
+   "to": "data:velocity",
+   "type": "produces"
+  },
+  {
+   "from": "data:cdp",
+   "type": "consumes",
+   "to": "vel2",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "statics",
+   "to": "vel2",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No refinement (residual statics, DMO or regularisation) has been applied since pass 1, so pass-2 velocity analysis will re-analyse essentially the same data."
+  },
+  {
+   "from": "inv_nmo",
+   "to": "vel2",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No refinement (residual statics, DMO or regularisation) has been applied since pass 1, so pass-2 velocity analysis will re-analyse essentially the same data."
+  },
+  {
+   "from": "data_reg",
+   "to": "vel2",
+   "type": "recommends",
+   "mode": "any",
+   "reason": "No refinement (residual statics, DMO or regularisation) has been applied since pass 1, so pass-2 velocity analysis will re-analyse essentially the same data."
+  },
+  {
+   "from": "nmo_final",
+   "to": "data:nmo",
+   "type": "produces"
+  },
+  {
+   "from": "data:cdp",
+   "type": "consumes",
+   "to": "nmo_final",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "vel2",
+   "type": "requires",
+   "to": "nmo_final",
+   "role": "velocity",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "vel1",
+   "type": "requires",
+   "to": "nmo_final",
+   "role": "velocity",
+   "preferred": false,
+   "tracked": true
+  },
+  {
+   "from": "stack",
+   "to": "data:section",
+   "type": "produces"
+  },
+  {
+   "from": "nmo_final",
+   "type": "requires",
+   "to": "stack",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "nmo1",
+   "type": "requires",
+   "to": "stack",
+   "role": "data",
+   "preferred": false,
+   "tracked": true
+  },
+  {
+   "from": "rna",
+   "to": "data:section",
+   "type": "produces"
+  },
+  {
+   "from": "data:section",
+   "type": "consumes",
+   "to": "rna",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "decon_post",
+   "to": "data:section",
+   "type": "produces"
+  },
+  {
+   "from": "data:section",
+   "type": "consumes",
+   "to": "decon_post",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "rna",
+   "to": "decon_post",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Noise attenuation is normally applied first so deconvolution does not sharpen random noise."
+  },
+  {
+   "from": "tvf",
+   "to": "data:section",
+   "type": "produces"
+  },
+  {
+   "from": "data:section",
+   "type": "consumes",
+   "to": "tvf",
+   "role": "data",
+   "preferred": true,
+   "tracked": false
+  },
+  {
+   "from": "decon_post",
+   "to": "tvf",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "The time-variant filter normally follows deconvolution, removing the high-frequency noise it boosts."
+  },
+  {
+   "from": "migration:poststack",
+   "to": "data:image",
+   "type": "produces"
+  },
+  {
+   "from": "data:section",
+   "type": "consumes",
+   "to": "migration:poststack",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "vel2",
+   "type": "requires",
+   "to": "migration:poststack",
+   "role": "velocity",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "vel1",
+   "type": "requires",
+   "to": "migration:poststack",
+   "role": "velocity",
+   "preferred": false,
+   "tracked": true
+  },
+  {
+   "from": "rna",
+   "to": "migration:poststack",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Post-stack conditioning is normally applied before migration so noise is not migrated into the image."
+  },
+  {
+   "from": "decon_post",
+   "to": "migration:poststack",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Post-stack conditioning is normally applied before migration so noise is not migrated into the image."
+  },
+  {
+   "from": "tvf",
+   "to": "migration:poststack",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Post-stack conditioning is normally applied before migration so noise is not migrated into the image."
+  },
+  {
+   "from": "migration:pstm",
+   "to": "data:image",
+   "type": "produces"
+  },
+  {
+   "from": "data:cdp",
+   "type": "consumes",
+   "to": "migration:pstm",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "vel2",
+   "type": "requires",
+   "to": "migration:pstm",
+   "role": "velocity",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "vel1",
+   "type": "requires",
+   "to": "migration:pstm",
+   "role": "velocity",
+   "preferred": false,
+   "tracked": true
+  },
+  {
+   "from": "data_reg",
+   "to": "migration:pstm",
+   "type": "recommends",
+   "mode": "all",
+   "reason": "Regularised offsets give the migration a consistent offset sampling at every CDP."
+  },
+  {
+   "from": "final_scale",
+   "to": "data:final",
+   "type": "produces"
+  },
+  {
+   "from": "migration:poststack",
+   "type": "requires",
+   "to": "final_scale",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "migration:pstm",
+   "type": "requires",
+   "to": "final_scale",
+   "role": "data",
+   "preferred": true,
+   "tracked": true
+  },
+  {
+   "from": "data:section",
+   "type": "consumes",
+   "to": "final_scale",
+   "role": "data",
+   "preferred": false,
+   "tracked": true
+  }
+ ]
+}

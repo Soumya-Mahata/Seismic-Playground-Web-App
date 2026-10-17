@@ -10,12 +10,17 @@ several different ideas into one. They are now separate:
 
 | Idea | What it answers | Where it lives | Can it block a stage? |
 |---|---|---|---|
-| **Recommended order** | "What is the usual sequence?" | `modules/pipeline.PIPELINE_STAGES` | No — display and documentation only |
-| **Genuine dependencies** | "What input does this computation need to exist?" | `modules/dependencies.STAGE_SPECS` → `Need` | **Yes (⛔)** |
-| **Recommendations** | "What is scientifically preferable before/after this?" | `STAGE_SPECS` → `Advice`, plus the order / repeat / stale checks | No — a ⚠ and a *Continue?* prompt |
+| **Recommended order** | "What is the usual sequence?" | the order of declaration in `modules/registry.OPERATIONS` (`pipeline.PIPELINE_STAGES` is a view of it) | No — display and documentation only |
+| **Genuine dependencies** | "What input does this computation need to exist?" | `modules/registry` → each operation's `Need`s (evaluated by `modules/dependencies`) | **Yes (⛔)** |
+| **Recommendations** | "What is scientifically preferable before/after this?" | `modules/registry` → each operation's `Advice`, plus the order / repeat / stale checks in `dependencies` | No — a ⚠ and a *Continue?* prompt |
 | **Data states** | "What data exists, and how was each piece made?" | `modules/state_graph.py` (`DataState`, `ProcessingGraph`) | — |
 | **Current processing state** | "What is the data *now*?" | `dependencies.current_processing_state` — derived from the states and their current pointers | — |
 | **Processing history** | "What did the person actually do, in what order?" | `modules/action_log.py` — an immutable, chronological action log | — |
+
+All three of the first rows are **declared once**, in the operation registry
+(`modules/registry.py`; the whole declaration, rendered, is
+[`OPERATIONS.md`](OPERATIONS.md)). `dependencies.py` only *evaluates* what the
+registry declares, so a dependency is never written down in two places.
 
 The last three rows are the ones most easily confused. The **history** is
 what was *done*, in the exact order it was done (`AGC, Band-pass, Mute, F-K,
@@ -185,8 +190,8 @@ different gathers), `invalid_input` (an explicitly named state that is not
 usable or no longer exists), `geometry`.
 
 **The advice must agree with the recommended order.** `tests/test_dependencies.py`
-asserts that every (earlier, later) pair implied by an `Advice` respects
-`PIPELINE_STAGES`, and that following the recommended order produces **zero**
+(and `tests/test_registry.py`) asserts that every (earlier, later) pair implied by
+an `Advice` respects the registry's recommended order, and that following the recommended order produces **zero**
 warnings at every step.
 
 ## Re-running, repeating, branching and going back
@@ -233,11 +238,13 @@ whether or not AGC ran first (tested), and the record says what it was measured 
 
 | File | Role |
 |---|---|
-| `modules/pipeline.py` | stage registry (recommended order), `STAGE_KIND`, store defaults, `ALIAS_KEYS`, report lines |
+| `modules/registry.py` | **the single source of operation metadata**: one `Operation` per operation (id, names, category, input/output data types, `Need`s, `Advice`, `Exclusion`s, parameter schema, validation, bound compute / QC functions, help), the data types, the queries (`get`, `find`, `stages`, `possible_warnings`, `workflow_graph`, `problems`) — pure Python |
+| `modules/registry_docs.py` | generates `docs/OPERATIONS.md` and `docs/workflow_graph.json` from the registry (`python -m modules.registry_docs [--check]`) |
+| `modules/pipeline.py` | `PIPELINE_STAGES` / `STAGE_KIND` / `ROOT_STAGES` / `STAGE_GROUPS` — views of the registry — plus store defaults, `ALIAS_KEYS`, report lines |
 | `modules/state_graph.py` | `DataState`, `ProcessingGraph`: ids, fingerprints, current pointers, lineage/dependents, undo/redo, discard, recipe, export — pure Python, no arrays |
-| `modules/dependencies.py` | the engine: `Need`, `Advice`, `StageSpec`, `STAGE_SPECS`, `Workflow`, `check_stage`, `stale_info` — pure Python |
+| `modules/dependencies.py` | the engine: evaluates the registry's `Need`s, `Advice` and `Exclusion`s — `Workflow`, `check_stage`, `stale_info`; `STAGE_SPECS` / `StageSpec` (= `registry.Operation`) are kept as names for the registry's entries — pure Python |
 | `modules/stage_ops.py` | `execute()` + one compute function and `run_*` wrapper per operation; payload storage, memoisation, release/materialise, replay — pure Python, takes any mutable mapping as its store; calls the **unchanged** maths |
-| `modules/validation.py` | `DependencyError` (a `ValidationError`) raised when a ⛔ stage is run anyway |
+| `modules/validation.py` | `DependencyError` (a `ValidationError`) raised when a ⛔ stage is run anyway; the parameter checks the registry's operation validators call (band vs Nyquist, F-K polygon, velocity range) |
 | `utils/session_state.py` | thin adapter over `st.session_state` (schema, `graph`, `check`, `current`, `result`, `undo`, `redo`, `discard` …) |
 | `utils/workflow_ui.py` | banners, the *Continue?* run button, input selector, data-states panel, status panels |
 | `views/*.py` | pages: call `wf.show_status` / `wf.run_button` / `wf.execute(stage_ops.run_…)` and display with `wf.result` |
@@ -254,18 +261,21 @@ stored stack, fold and naive matrices.)
 
 ### Adding a stage
 
-See **`CLAUDE.md` → "Adding a stage"** for the full checklist. In short: a
-`Stage` in `PIPELINE_STAGES` and its `STAGE_KIND`; a `StageSpec` in
-`STAGE_SPECS` (`Need`s = genuine, `Advice` = recommended); an `@_op` compute
-function and a `run_<stage>` wrapper in `stage_ops.py` that records the complete
-parameters; a view using `wf.show_status` / `wf.run_button` / `wf.execute`. The
-registry tests fail if a stage lacks a spec or an executor, or if its advice
-contradicts the recommended order.
+See **`CLAUDE.md` → "Adding an operation"** for the full checklist. In short: one
+`Operation` in `modules/registry.py`, at its recommended position (`Need`s =
+genuine, `Advice` = recommended, `ParamSpec`s = parameters with defaults from
+`config.py`); an `@_op` compute function and a `run_<stage>` wrapper in
+`stage_ops.py` that records the complete parameters; a view using
+`wf.show_status` / `wf.run_button` / `wf.execute`; then
+`python -m modules.registry_docs`. The registry tests fail if an operation lacks
+an implementation, if its advice contradicts the recommended order, or if the
+generated documentation is out of date.
 
 ## Tests
 
 | File | Covers |
 |---|---|
+| `tests/test_registry.py` | the registry: internal consistency (`registry.problems()`), the brief's examples (band-pass, AGC, NMO, stack, migration, statics), derived views identical to the registry, no re-declared dependency tables (AST guards), compute functions bound, wrappers record exactly the schema defaults, each bound is the exact edge of what is accepted, invalid parameters refused before the maths and recorded, generated docs current, workflow graph well-formed |
 | `tests/test_state_graph.py` | the graph with no data: ids never reused, fingerprints, current pointers, undo/redo, lineage, dependents, discard, recipe |
 | `tests/test_dependencies.py` | the engine on a bare graph: golden path has zero warnings; both task example orders; every optional stage skippable; shot operators in all 24 orders; every genuine dependency (⛔); recommendation wording; repeated operations and branching; stale reasons; inputs from different gathers; advice consistent with the recommended order |
 | `tests/test_stage_ops.py` | the same through the real maths, and the state model: non-standard orders, skipped stages, `DependencyError` leaves no trace, repeat / branch / memoise, no input copies, release and re-materialise bit-for-bit, memory budget, undo / redo, discard, stale detection after real runs, trace-edit `detect` input, manual velocity picks as parameters, replayable recipes, PSTM without stack/regularisation, export |
